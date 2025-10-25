@@ -1589,53 +1589,80 @@ def _extract_trailing_int(txt: str | None):
 
 def _employeeeditor_save(self: EmployeeEditor):
     def f2(x):
-        try: return float(x)
-        except: return 0.0
+        try:
+            return float(x)
+        except Exception:
+            return 0.0
 
     def dget(qd: QDateEdit) -> date | None:
-        try: return qd.date().toPython()
-        except: return None
+        try:
+            return qd.date().toPython()
+        except Exception:
+            return None
+
+    # required field first
+    name = (self.full_name.text() or "").strip()
+    if not name:
+        QMessageBox.warning(self, "Missing", "Full Name is required.")
+        return
 
     with SessionLocal() as s:
         if self._emp_id:
             e = s.get(Employee, self._emp_id)
+            if not e:
+                QMessageBox.critical(self, "Error", "Employee record not found.")
+                return
         else:
-            code = None
-            e = Employee(account_id=tenant_id(), code=code or "")
+            # allocate code BEFORE any flush
+            prefix, z = EMP_CODE_PREFIX, EMP_CODE_ZPAD
+            existing = [
+                c for (c,) in s.query(Employee.code)
+                .filter(Employee.account_id == tenant_id(), Employee.code.isnot(None), Employee.code.like(f"{prefix}%"))
+                .all()
+            ]
+            def _num_tail(c):
+                if not c: return None
+                m = re.search(r"(\d+)$", c)
+                return int(m.group(1)) if m else None
+            used = {n for n in (_num_tail(c) for c in existing) if n is not None}
+            nxt = (max(used) + 1) if used else 1
+            code = f"{prefix}{nxt:0{z}d}"
+
+            # create with full_name set to satisfy NOT NULL
+            e = Employee(account_id=tenant_id(), code=code, full_name=name)
             s.add(e)
-            s.flush()
-            if not code:
-                e.code = EmployeeMainWidget._next_employee_code(EmployeeMainWidget, s)
+            s.flush()  # safe now
+
             self._emp_id = e.id
 
         # personal
-        e.full_name = self.full_name.text().strip()
-        e.email = self.email.text().strip()
-        e.contact_number = self.contact.text().strip()
-        e.address = self.address.text().strip()
-        e.id_type = self.id_type.currentText()
-        e.id_number = self.id_number.text().strip()
-        e.gender = self.gender.currentText()
+        e.full_name = name  # ensure updated on edit path too
+        e.email = (self.email.text() or "").strip()
+        e.contact_number = (self.contact.text() or "").strip()
+        e.address = (self.address.text() or "").strip()
+        e.id_type = self.id_type.currentText() or ""
+        e.id_number = (self.id_number.text() or "").strip()
+        e.gender = self.gender.currentText() or ""
         e.dob = dget(self.dob)
-        e.race = self.race.currentText()
-        e.country = self.country.currentText()
-        e.residency = self.residency.currentText()
+        e.race = self.race.currentText() or ""
+        e.country = self.country.currentText() or ""
+        e.residency = self.residency.currentText() or ""
         e.pr_date = dget(self.pr_date) if self.pr_date.isEnabled() else None
 
         # employment
-        e.employment_status = self.employment_status.currentText()
-        e.employment_pass = self.employment_pass.currentText()
-        e.work_permit_number = self.work_permit_number.text().strip() if self.work_permit_number.isEnabled() else ""
-        e.department = self.department.currentText()
-        e.position = self.position.currentText()
-        e.employment_type = self.employment_type.currentText()
+        e.employment_status = self.employment_status.currentText() or ""
+        e.employment_pass = self.employment_pass.currentText() or ""
+        e.work_permit_number = (self.work_permit_number.text() or "").strip() if self.work_permit_number.isEnabled() else ""
+        e.department = self.department.currentText() or ""
+        e.position = self.position.currentText() or ""
+        e.employment_type = self.employment_type.currentText() or ""
         e.join_date = dget(self.join_date)
         e.exit_date = dget(self.exit_date)
-        e.holiday_group = self.holiday_group.currentText()
+        e.holiday_group = self.holiday_group.currentText() or ""
 
         # payment
-        e.bank = self.bank.currentText()
-        e.bank_account = self.bank_account.text().strip()
+        e.bank = self.bank.currentText() or ""
+        e.bank_account = (self.bank_account.text() or "").strip()
 
         # remuneration snapshot
         e.incentives = f2(self.incentives.text())
@@ -1659,7 +1686,8 @@ def _employeeeditor_save(self: EmployeeEditor):
             row = SalaryHistory(account_id=tenant_id(), employee_id=e.id, amount=amt, start_date=sd, end_date=ed)
             s.add(row)
             if sd and sd >= latest_start:
-                latest_start = sd; latest_amt = amt
+                latest_start = sd
+                latest_amt = amt
         e.basic_salary = latest_amt
 
         # work schedule
@@ -1678,9 +1706,9 @@ def _employeeeditor_save(self: EmployeeEditor):
             for c in range(self.ent_tbl.columnCount()):
                 hdr = self.ent_tbl.horizontalHeaderItem(c)
                 t = hdr.text() if hdr else "Leave"
-                val_txt = self.ent_tbl.item(r, c).text() if self.ent_tbl.item(r, c) else "0"
+                cell = self.ent_tbl.item(r, c)
                 try:
-                    days = float(val_txt)
+                    days = float(cell.text()) if cell and cell.text() else 0.0
                 except Exception:
                     days = 0.0
                 s.add(LeaveEntitlement(
@@ -1688,7 +1716,13 @@ def _employeeeditor_save(self: EmployeeEditor):
                     year_of_service=r + 1, leave_type=t, days=days
                 ))
 
-        s.commit()
+        try:
+            s.commit()
+        except Exception as ex:
+            s.rollback()
+            QMessageBox.critical(self, "Save failed", f"{ex}")
+            return
+
     self.accept()
 
 
