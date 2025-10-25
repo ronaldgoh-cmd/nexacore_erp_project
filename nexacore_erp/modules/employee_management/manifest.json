@@ -1,0 +1,12 @@
+{
+  "name": "Employee Management",
+  "version": "0.2.0",
+  "submodules": [
+    "Leave Management",
+    "Salary Management"
+  ],
+  "requires": [
+    "core>=0.1.0"
+  ],
+  "description": "Employees DB with Holidays, Settings, Leave and Salary submodules (skeleton)."
+}
