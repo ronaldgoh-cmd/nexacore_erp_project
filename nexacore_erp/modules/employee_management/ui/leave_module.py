@@ -7,13 +7,15 @@ from typing import Optional, Dict, List, Tuple, Set
 from PySide6.QtCore import Qt, QDate
 from PySide6.QtWidgets import (
     QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QDateEdit,
-    QTableWidget, QTableWidgetItem, QLineEdit, QPushButton, QHeaderView, QMessageBox, QSpinBox
+    QTableWidget, QTableWidgetItem, QLineEdit, QPushButton, QHeaderView, QMessageBox,
+    QSpinBox, QFormLayout, QDoubleSpinBox, QAbstractItemView
 )
 
 # Project imports (keep these paths)
 from ....core.database import SessionLocal
 from ....core.tenant import id as tenant_id
 from ..models import Employee  # must exist
+MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"]
 
 
 # ----------------------------
@@ -74,7 +76,6 @@ def _holidays_between(session, d0: date, d1: date) -> Dict[date, float]:
     """
     Reads holidays(date TEXT 'YYYY-MM-DD', is_half_day INT) as generic/global.
     Returns map of date -> 1.0 (full) or 0.5 (half). Empty if table missing.
-    Extend later for holiday groups if you add an employee->group mapping.
     """
     if not _table_exists(session, "holidays"):
         return {}
@@ -116,7 +117,7 @@ def _compute_used_days(
         AM..AM => 0.5
         PM..PM => 0.5
         AM..PM => 1.0
-        PM..AM => 0.0 (invalid range, coerced to 0)
+        PM..AM => 0.0
     - Multi-day:
         first day: 0.5 if start=PM else 1.0 (if working day)
         last day:  0.5 if end=AM   else 1.0 (if working day)
@@ -133,19 +134,12 @@ def _compute_used_days(
         return d.weekday() in workdays
 
     def holiday_weight(d: date, half: Optional[str] = None) -> float:
-        """
-        Returns reduction for that day:
-        - full holiday => 1.0
-        - half holiday => 0.5 if the taken half coincides; else 0.0
-        - none         => 0.0
-        """
         w = hols.get(d, 0.0)
         if w >= 1.0:
             return 1.0
         if w == 0.5:
             if half in ("AM", "PM"):
                 return 0.5
-            # full-day leave on a half-holiday reduces only 0.5
             return 0.5
         return 0.0
 
@@ -163,10 +157,8 @@ def _compute_used_days(
             return max(0.0, gross - min(red, gross))
         if s_half == "AM" and e_half == "PM":
             gross = 1.0
-            # If half-holiday, reduce 0.5; if full, reduce 1.0
             red = holiday_weight(s_date, None)
             return max(0.0, gross - min(red, gross))
-        # PM..AM invalid
         return 0.0
 
     # Multi-day
@@ -195,13 +187,10 @@ def _compute_used_days(
 # --------------------------------------
 
 def _ensure_leave_tables(session):
-    """No-op for Alembic users. Kept for SQLite-only setups."""
-    # Intentionally empty. Use migrations in real deployments.
     return
 
 
 def _fetch_leave_types(session) -> List[str]:
-    # Try a dedicated leave_types table; else fall back to free text.
     if _table_exists(session, "leave_types"):
         rows = _safe_rows(session, "SELECT name FROM leave_types WHERE COALESCE(active,1)=1 ORDER BY name")
         vals = [r[0] for r in rows if r and r[0]]
@@ -210,7 +199,6 @@ def _fetch_leave_types(session) -> List[str]:
 
 
 def _entitlement_for(session, emp_id: int, leave_type: str, year: int) -> float:
-    # Try leave_entitlements(employee_id, leave_type, year, days)
     if _table_exists(session, "leave_entitlements"):
         v = _safe_scalar(session, """
             SELECT days FROM leave_entitlements
@@ -221,12 +209,10 @@ def _entitlement_for(session, emp_id: int, leave_type: str, year: int) -> float:
                 return float(v)
             except Exception:
                 pass
-    # Default if nothing configured
-    return 14.0  # common annual leave default
+    return 14.0
 
 
 def _adjustments_total(session, emp_id: int, leave_type: str, year: int) -> float:
-    # leave_adjustments(employee_id, leave_type, year, days, remarks)
     if _table_exists(session, "leave_adjustments"):
         v = _safe_scalar(session, """
             SELECT COALESCE(SUM(days),0) FROM leave_adjustments
@@ -240,7 +226,6 @@ def _adjustments_total(session, emp_id: int, leave_type: str, year: int) -> floa
 
 
 def _used_days_total(session, emp_id: int, leave_type: str, year: int) -> float:
-    # leave_applications(... used_days REAL, status TEXT)
     if _table_exists(session, "leave_applications"):
         v = _safe_scalar(session, """
             SELECT COALESCE(SUM(used_days),0) FROM leave_applications
@@ -304,6 +289,51 @@ def _list_applications(session, year: int) -> List[Tuple]:
     """, {"y": str(year), "acc": tenant_id()})
 
 
+# --- adjustments helpers ---
+
+def _insert_adjustment(session,
+                       emp_id: int,
+                       leave_type: str,
+                       when: date,
+                       days: float,
+                       remarks: str) -> bool:
+    if not _table_exists(session, "leave_adjustments"):
+        return False
+    try:
+        session.execute("""
+            INSERT INTO leave_adjustments
+            (account_id, employee_id, leave_type, year, date, days, remarks, created_at)
+            VALUES
+            (:acc, :eid, :typ, :yr, :d, :days, :rem, CURRENT_TIMESTAMP)
+        """, {
+            "acc": tenant_id(),
+            "eid": emp_id,
+            "typ": leave_type,
+            "yr": when.year,
+            "d": when.isoformat(),
+            "days": float(days),
+            "rem": remarks or ""
+        })
+        session.commit()
+        return True
+    except Exception:
+        session.rollback()
+        return False
+
+
+def _list_adjustments(session, limit: int = 200) -> List[Tuple]:
+    if not _table_exists(session, "leave_adjustments"):
+        return []
+    return _safe_rows(session, f"""
+        SELECT la.date, e.full_name, COALESCE(e.code,''), la.leave_type, la.days, COALESCE(la.remarks,'')
+        FROM leave_adjustments la
+        LEFT JOIN employees e ON e.id = la.employee_id
+        WHERE la.account_id = :acc
+        ORDER BY la.date DESC, la.rowid DESC
+        LIMIT {int(limit)}
+    """, {"acc": tenant_id()})
+
+
 # ----------------------------
 # UI
 # ----------------------------
@@ -321,7 +351,6 @@ class LeaveModuleWidget(QWidget):
         self._build_application_tab()
         self._build_adjustments_tab()
 
-        # initial loads
         self._refresh_all()
 
     # -------- Calendar --------
@@ -332,25 +361,26 @@ class LeaveModuleWidget(QWidget):
 
         top = QHBoxLayout()
         self.month = QComboBox()
-        self.month.addItems([f"{i:02d}" for i in range(1, 13)])
+        self.month.addItems(MONTHS)
         self.year = QComboBox()
         self.year.addItems([str(y) for y in range(2024, 2036)])
         today = date.today()
         self.month.setCurrentIndex(today.month - 1)
         self.year.setCurrentText(str(today.year))
 
-        btn_reload = QPushButton("Reload")
-        btn_reload.clicked.connect(self._reload_calendar)
+        # live refresh on change
+        self.month.currentTextChanged.connect(lambda _=None: self._reload_calendar())
+        self.month.currentIndexChanged.connect(lambda _=None: self._reload_calendar())
+        self.year.currentTextChanged.connect(lambda _=None: self._reload_calendar())
+        self.year.currentIndexChanged.connect(lambda _=None: self._reload_calendar())
 
         top.addWidget(QLabel("Month"))
         top.addWidget(self.month)
         top.addWidget(QLabel("Year"))
         top.addWidget(self.year)
         top.addStretch(1)
-        top.addWidget(btn_reload)
         v.addLayout(top)
 
-        # simple 6x7 grid
         self.cal = QTableWidget(6, 7)
         self.cal.setEditTriggers(QTableWidget.NoEditTriggers)
         self.cal.setSelectionMode(QTableWidget.NoSelection)
@@ -365,27 +395,26 @@ class LeaveModuleWidget(QWidget):
         self._populate_calendar()
 
     def _populate_calendar(self):
-        # Clear
         for r in range(6):
             for c in range(7):
                 self.cal.setItem(r, c, QTableWidgetItem(""))
 
         try:
-            m = int(self.month.currentText())
+            m = self.month.currentIndex() + 1
             y = int(self.year.currentText())
         except Exception:
             return
 
         first = date(y, m, 1)
-        start_col = (first.weekday() + 6) % 7  # make Monday=0..Sunday=6 -> same as Qt header
-        # fill dates
+        # Python weekday: Mon=0..Sun=6 aligns with our headers
+        start_col = first.weekday()
+
         r, c = 0, start_col
         d = first
         while d.month == m:
             item = QTableWidgetItem(str(d.day))
             item.setTextAlignment(Qt.AlignTop | Qt.AlignLeft)
             self.cal.setItem(r, c, item)
-            # move
             c += 1
             if c >= 7:
                 c = 0
@@ -459,7 +488,7 @@ class LeaveModuleWidget(QWidget):
         self.sum_year.setRange(2000, 2100)
         self.sum_year.setValue(date.today().year)
         self.sum_type = QComboBox()
-        self.sum_type.setEditable(True)  # supports free text if no table
+        self.sum_type.setEditable(True)
         self.sum_reload = QPushButton("Reload")
         self.sum_reload.clicked.connect(self._populate_summary)
         top.addWidget(self.sum_year)
@@ -506,13 +535,12 @@ class LeaveModuleWidget(QWidget):
         host = QWidget()
         v = QVBoxLayout(host)
 
-        # Row 1: picker
         h = QHBoxLayout()
         self.emp = QComboBox()
         self._load_employees()
 
         self.type = QComboBox()
-        self.type.setEditable(True)  # allow free text
+        self.type.setEditable(True)
         self._load_leave_types()
 
         self.s_date = QDateEdit()
@@ -544,7 +572,6 @@ class LeaveModuleWidget(QWidget):
         h.addStretch(1)
         v.addLayout(h)
 
-        # Row 2: computed
         info = QHBoxLayout()
         self.lbl_used = QLabel("Total Used: 0.00")
         self.lbl_balance = QLabel("Balance: –")
@@ -554,7 +581,6 @@ class LeaveModuleWidget(QWidget):
         info.addStretch(1)
         v.addLayout(info)
 
-        # Row 3: actions
         act = QHBoxLayout()
         btn_calc = QPushButton("Recalculate")
         btn_save = QPushButton("Submit Application")
@@ -565,7 +591,6 @@ class LeaveModuleWidget(QWidget):
         act.addWidget(btn_save)
         v.addLayout(act)
 
-        # React to changes
         self.emp.currentIndexChanged.connect(self._recalculate_used)
         self.type.currentIndexChanged.connect(self._recalculate_used)
         self.s_date.dateChanged.connect(self._recalculate_used)
@@ -629,7 +654,7 @@ class LeaveModuleWidget(QWidget):
             QMessageBox.information(
                 self, "Note",
                 "Application not written because table 'leave_applications' was not found.\n"
-                "Calculation still works. Create the table to persist."
+                "Create the table to persist."
             )
 
     # -------- Adjustments --------
@@ -637,8 +662,74 @@ class LeaveModuleWidget(QWidget):
     def _build_adjustments_tab(self):
         host = QWidget()
         v = QVBoxLayout(host)
-        v.addWidget(QLabel("Adjustments placeholder – add UI later."))
+
+        form = QFormLayout()
+        self.adj_emp = QComboBox(); self._load_employees_into(self.adj_emp)
+        self.adj_date = QDateEdit(); self.adj_date.setCalendarPopup(True); self.adj_date.setDate(QDate.currentDate())
+        self.adj_type = QComboBox(); self._load_leave_types_into(self.adj_type)
+        self.adj_days = QDoubleSpinBox(); self.adj_days.setRange(-365.0, 365.0); self.adj_days.setSingleStep(0.5); self.adj_days.setDecimals(1)
+        self.adj_rem = QLineEdit(); self.adj_rem.setPlaceholderText("Remarks (optional)")
+
+        form.addRow("Employee", self.adj_emp)
+        form.addRow("Date", self.adj_date)
+        form.addRow("Leave Type", self.adj_type)
+        form.addRow("± Days", self.adj_days)
+        form.addRow("Remarks", self.adj_rem)
+        v.addLayout(form)
+
+        actions = QHBoxLayout()
+        btn_add = QPushButton("Add Adjustment")
+        btn_add.clicked.connect(self._save_adjustment)
+        actions.addStretch(1)
+        actions.addWidget(btn_add)
+        v.addLayout(actions)
+
+        self.adj_tbl = QTableWidget(0, 5)
+        self.adj_tbl.setHorizontalHeaderLabels(["Date", "Employee", "Code", "Type", "± Days"])
+        self.adj_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.adj_tbl.horizontalHeader().setStretchLastSection(True)
+        self.adj_tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        v.addWidget(self.adj_tbl, 1)
+
         self.tabs.addTab(host, "Adjustments")
+
+    def _reload_adjustments(self):
+        if not hasattr(self, "adj_tbl"):
+            return
+        self.adj_tbl.setRowCount(0)
+        with SessionLocal() as s:
+            rows = _list_adjustments(s, limit=200)
+        for d, name, code, ltype, days, _rem in rows:
+            r = self.adj_tbl.rowCount(); self.adj_tbl.insertRow(r)
+            self.adj_tbl.setItem(r, 0, QTableWidgetItem(str(d or "")))
+            self.adj_tbl.setItem(r, 1, QTableWidgetItem(name or ""))
+            self.adj_tbl.setItem(r, 2, QTableWidgetItem(code or ""))
+            self.adj_tbl.setItem(r, 3, QTableWidgetItem(ltype or ""))
+            self.adj_tbl.setItem(r, 4, QTableWidgetItem(f"{float(days):.1f}"))
+
+    def _save_adjustment(self):
+        emp_id = self.adj_emp.currentData()
+        if not emp_id:
+            QMessageBox.warning(self, "Missing", "Select an employee.")
+            return
+        when = self.adj_date.date().toPython()
+        ltype = self.adj_type.currentText().strip() or "Annual Leave"
+        days = float(self.adj_days.value())
+        remarks = self.adj_rem.text().strip()
+
+        with SessionLocal() as s:
+            ok = _insert_adjustment(s, emp_id, ltype, when, days, remarks)
+
+        if ok:
+            QMessageBox.information(self, "Saved", "Adjustment saved.")
+            self._populate_summary()
+            self._reload_adjustments()
+        else:
+            QMessageBox.information(
+                self, "Note",
+                "Adjustment not written because table 'leave_adjustments' was not found.\n"
+                "Create the table to persist."
+            )
 
     # -------- Data loads --------
 
@@ -649,6 +740,13 @@ class LeaveModuleWidget(QWidget):
         for r in rows:
             self.emp.addItem(f"{r.full_name} ({r.code})", r.id)
 
+    def _load_employees_into(self, combo: QComboBox):
+        combo.clear()
+        with SessionLocal() as s:
+            rows = s.query(Employee).filter(Employee.account_id == tenant_id()).order_by(Employee.full_name).all()
+        for r in rows:
+            combo.addItem(f"{r.full_name} ({r.code})", r.id)
+
     def _load_leave_types(self):
         with SessionLocal() as s:
             types = _fetch_leave_types(s)
@@ -656,12 +754,17 @@ class LeaveModuleWidget(QWidget):
             self.type.clear()
             self.type.addItems(types)
 
-        # Summary tab type dropdown mirrors this list
         self.sum_type.clear()
         if types:
             self.sum_type.addItems(types)
         else:
             self.sum_type.addItem("Annual Leave")
+
+    def _load_leave_types_into(self, combo: QComboBox):
+        combo.clear()
+        with SessionLocal() as s:
+            types = _fetch_leave_types(s)
+        combo.addItems(types or ["Annual Leave"])
 
     # -------- Full refresh --------
 
@@ -673,3 +776,4 @@ class LeaveModuleWidget(QWidget):
         self._populate_details()
         self._populate_summary()
         self._recalculate_used()
+        self._reload_adjustments()
