@@ -4,15 +4,15 @@ from __future__ import annotations
 import base64
 from calendar import month_name
 from datetime import date
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 from PySide6.QtCore import Qt, QMarginsF
-from PySide6.QtGui import QTextDocument, QPageSize, QPageLayout
+from PySide6.QtGui import QTextDocument, QPageSize, QPageLayout, QFont, QPixmap
 from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import (
     QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QTableWidget,
     QTableWidgetItem, QPushButton, QComboBox, QFileDialog, QHeaderView, QGroupBox,
-    QFormLayout, QTextEdit, QTableWidgetSelectionRange, QSizePolicy
+    QFormLayout, QTextBrowser, QTableWidgetSelectionRange, QSizePolicy, QScrollArea, QFrame
 )
 
 from ....core.database import SessionLocal
@@ -21,9 +21,10 @@ from ..models import Employee
 from ....core.models import CompanySettings
 
 
-# ---------- helpers ----------
-# voucher code format (editable from Settings → Apply)
-_VOUCHER_FMT = "SV-{YYYY}{MM}-{EMP}"
+# ---------- globals / helpers ----------
+_VOUCHER_FMT = "SV-{YYYY}{MM}-{EMP}"           # editable from Settings
+_STAMP_B64: Optional[str] = None               # set from Settings → Upload Company Stamp
+
 
 def _format_voucher_code(emp: Employee | None, year: int, month_index_1: int) -> str:
     tpl = globals().get("_VOUCHER_FMT", "SV-{YYYY}{MM}-{EMP}") or "SV-{YYYY}{MM}-{EMP}"
@@ -32,6 +33,7 @@ def _format_voucher_code(emp: Employee | None, year: int, month_index_1: int) ->
     return (tpl.replace("{YYYY}", str(year))
                .replace("{MM}", mm)
                .replace("{EMP}", emp_code))
+
 
 def _img_data_uri(png_bytes: bytes | None, fallback_label: str = "Logo") -> str:
     if png_bytes:
@@ -44,6 +46,22 @@ def _img_data_uri(png_bytes: bytes | None, fallback_label: str = "Logo") -> str:
         "<div style=\"height:64px;width:160px;border:1px solid #cfcfcf;border-radius:6px;"
         "display:flex;align-items:center;justify-content:center;color:#9aa0a6;font-size:12px;\">"
         f"{fallback_label}</div>"
+    )
+
+
+def _stamp_img_html(cs: CompanySettings | None) -> str:
+    # pick global in-memory stamp first; else CompanySettings.stamp if present
+    b64 = _STAMP_B64
+    if not b64:
+        raw = getattr(cs, "stamp", None)
+        if raw:
+            b64 = base64.b64encode(raw).decode("ascii")
+    if not b64:
+        return ""
+    # light opacity, auto-size within box
+    return (
+        "<img src=\"data:image/png;base64," + b64 +
+        "\" style=\"max-height:120px;max-width:220px;opacity:0.75;object-fit:contain;\"/>"
     )
 
 
@@ -74,6 +92,7 @@ def _voucher_html(cs: CompanySettings | None, emp: Employee | None, year: int, m
     detail1 = (cs.detail1 if cs else "") or "Company details line 1"
     detail2 = (cs.detail2 if cs else "") or "Company details line 2"
     logo_html = _img_data_uri(getattr(cs, "logo", None), "Logo")
+    stamp_html = _stamp_img_html(cs)
 
     # --- employee snapshot ---
     emp_name = getattr(emp, "full_name", "") or "—"
@@ -82,7 +101,7 @@ def _voucher_html(cs: CompanySettings | None, emp: Employee | None, year: int, m
     bank     = getattr(emp, "bank", "") or "—"
     acct     = getattr(emp, "bank_account", "") or "—"
 
-    # --- figures (use your stored fields; labels show Rate * Hr as requested) ---
+    # --- figures ---
     basic   = float(getattr(emp, "basic_salary", 0.0) or 0.0)
     comm    = float(getattr(emp, "commission", 0.0) or 0.0)
     incent  = float(getattr(emp, "incentives", 0.0) or 0.0)
@@ -96,26 +115,22 @@ def _voucher_html(cs: CompanySettings | None, emp: Employee | None, year: int, m
     ot_hrs  = float(getattr(emp, "overtime_hours", 0.0) or 0.0)
     ot_amt  = ot_rate * ot_hrs
 
-    # deductions panel = Advanced + SHG only
     advance = float(getattr(emp, "advance", 0.0) or 0.0)
     shg     = float(getattr(emp, "shg", 0.0) or 0.0)
 
-    # CPF block
     cpf_emp = float(getattr(emp, "cpf_employee", 0.0) or 0.0)
     cpf_er  = float(getattr(emp, "cpf_employer", 0.0) or 0.0)
     cpf_total = cpf_emp + cpf_er
 
-    # Others block
     sdl  = float(getattr(emp, "sdl", 0.0) or 0.0)
     levy = float(getattr(emp, "levy", 0.0) or 0.0)
 
     gross = basic + comm + incent + allow + pt_amt + ot_amt
     ded_only = advance + shg
-    # Net pay excludes employer CPF, SDL, Levy. Employee CPF reduces net.
     net_pay = gross - ded_only - cpf_emp
 
     ym = f"{month_name[month_index_1]} {year}"
-    code = f"SV-{year}{month_index_1:02d}-{(getattr(emp, 'code', '') or 'EMP001')}"
+    code = _format_voucher_code(emp, year, month_index_1)
 
     def money(x: float) -> str:
         try:
@@ -131,8 +146,9 @@ def _voucher_html(cs: CompanySettings | None, emp: Employee | None, year: int, m
 <meta charset="utf-8"/>
 <title>Salary Voucher</title>
 <style>
+  html, body {{ font-size: 13px; }}
   body {{ margin:0; background:#ffffff; color:#111827; font-family:Segoe UI, Arial, sans-serif; }}
-  .page {{ width:794px; margin:0 auto; padding:36px 28px; }}
+  .page {{ width:794px; margin:0 auto; padding:24px 18px; }}   /* thinner padding to improve on-screen scroll */
   .muted {{ color:#6b7280; }}
   .rule  {{ height:1px; background:#e5e7eb; }}
   .panel {{ border:1px solid #e5e7eb; border-radius:6px; }}
@@ -145,7 +161,7 @@ def _voucher_html(cs: CompanySettings | None, emp: Employee | None, year: int, m
 <body>
   <div class="page">
 
-    <!-- Header: company text aligned left beside logo -->
+    <!-- Header -->
     <table cellpadding="0" cellspacing="0" width="100%">
       <tr>
         <td style="width:170px;vertical-align:top">{logo_html}</td>
@@ -164,7 +180,7 @@ def _voucher_html(cs: CompanySettings | None, emp: Employee | None, year: int, m
     <div class="rule" style="margin:8px 0 12px 0"></div>
     <div class="title">Salary Voucher</div>
 
-    <!-- Employee box: swap Employee Code above Employee, remove Position, change Department->Identification Number -->
+    <!-- Employee box -->
     <table cellpadding="0" cellspacing="0" width="100%" class="panel" style="margin:8px 0 10px 0">
       <tr><td class="cap">Employee</td></tr>
       <tr>
@@ -272,20 +288,14 @@ def _voucher_html(cs: CompanySettings | None, emp: Employee | None, year: int, m
       </tr>
     </table>
 
-    <!-- Notes -->
-    <div style="margin-top:12px;font-weight:bold">Notes</div>
-    <div class="muted" style="font-size:13px">
-      Figures reflect the 'Salary Review' records for the selected period. If no record exists, this preview
-      shows zeros and a not-found notice. CPF and statutory amounts shown are those stored in the review.
-    </div>
-
-    <!-- Signatures -->
+    <!-- Signatures + Stamp -->
     <table cellpadding="0" cellspacing="0" width="100%" style="margin-top:22px">
       <tr>
         <td style="width:50%;vertical-align:bottom">
           <div style="font-weight:bold">Prepared by: {html.escape(company_name)}</div>
         </td>
         <td style="width:50%;text-align:right;vertical-align:bottom">
+          {stamp_html}
           <div>Employee Acknowledgement</div>
           <div style="height:1px;background:#e5e7eb;margin-top:18px"></div>
         </td>
@@ -305,10 +315,23 @@ class SalaryModuleWidget(QWidget):
         v = QVBoxLayout(self)
         v.addWidget(self.tabs)
 
+        # in-memory stamp mirror for preview
+        self._company_stamp_b64: Optional[str] = None
+
         self._build_summary_tab()
         self._build_salary_review_tab()
         self._build_vouchers_tab()
         self._build_settings_tab()
+
+        # try preload stamp from CompanySettings
+        cs = _company()
+        raw = getattr(cs, "stamp", None)
+        if raw and not self._company_stamp_b64:
+            try:
+                self._company_stamp_b64 = base64.b64encode(raw).decode("ascii")
+                globals()["_STAMP_B64"] = self._company_stamp_b64
+            except Exception:
+                pass
 
     # -- Summary
     def _build_summary_tab(self):
@@ -353,7 +376,6 @@ class SalaryModuleWidget(QWidget):
             self.tbl.setItem(r, 5, QTableWidgetItem(f"{(e.overtime_rate or 0.0):.2f}"))
             self.tbl.setItem(r, 6, QTableWidgetItem(f"{(e.parttime_rate or 0.0):.2f}"))
 
-    # -- Salary Review (batches list + create/edit window for all active employees)
     def _build_salary_review_tab(self):
         from datetime import date, datetime
         from calendar import monthrange
@@ -406,7 +428,7 @@ class SalaryModuleWidget(QWidget):
             b = (br or "").replace(" ", "")
             try:
                 if "-" in b:
-                    lo, hi = b.split("-");
+                    lo, hi = b.split("-")
                     return int(lo) <= a <= int(hi)
                 if b.startswith("<="): return a <= int(b[2:])
                 if b.startswith("<"):  return a < int(b[1:])
@@ -516,7 +538,6 @@ class SalaryModuleWidget(QWidget):
                 s.commit()
 
         def _active_employees(y, m):
-            # active if join_date <= EOM and (exit_date is null or exit_date >= SOM)
             som = date(y, m, 1)
             eom = date(y, m, monthrange(y, m)[1])
             rows = []
@@ -552,8 +573,8 @@ class SalaryModuleWidget(QWidget):
 
         toolbar = QHBoxLayout()
         toolbar.addWidget(QLabel("Month"))
-        cb_month = QComboBox();
-        cb_month.addItems(_month_names());
+        cb_month = QComboBox()
+        cb_month.addItems(_month_names())
         cb_month.setCurrentIndex(date.today().month - 1)
         toolbar.addWidget(cb_month)
         toolbar.addSpacing(12)
@@ -598,7 +619,7 @@ class SalaryModuleWidget(QWidget):
                   ORDER BY year DESC, month DESC, id DESC
                 """)).fetchall()
             for _id, y, m, tb, ter, gt, st in rows:
-                r = tbl.rowCount();
+                r = tbl.rowCount()
                 tbl.insertRow(r)
 
                 def item(val):
@@ -644,18 +665,18 @@ class SalaryModuleWidget(QWidget):
             cash = gross - ee - shg
 
             def setv(c, val):
-                it = QTableWidgetItem(f"{val:,.2f}");
-                it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter);
+                it = QTableWidgetItem(f"{val:,.2f}")
+                it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 t.setItem(row_idx, c, it)
 
-            setv(9, gross);
-            setv(11, shg);
-            setv(12, sdl);
-            setv(13, ee);
-            setv(14, er);
-            setv(15, cpf_t);
-            setv(16, ee_c);
-            setv(17, er_c);
+            setv(9, gross)
+            setv(11, shg)
+            setv(12, sdl)
+            setv(13, ee)
+            setv(14, er)
+            setv(15, cpf_t)
+            setv(16, ee_c)
+            setv(17, er_c)
             setv(18, cash)
 
         def _recalc_totals(t):
@@ -679,14 +700,14 @@ class SalaryModuleWidget(QWidget):
                     b = s.execute(text("SELECT year, month, status FROM payroll_batches WHERE id=:i"),
                                   {"i": batch_id}).fetchone()
                     if not b:
-                        QMessageBox.warning(host, "Salary Review", "Batch not found.");
+                        QMessageBox.warning(host, "Salary Review", "Batch not found.")
                         return
                     y, m, status = int(b.year), int(b.month), b.status
                     if status == "Submitted" and not read_only:
                         QMessageBox.information(host, "Salary Review", "Batch is submitted. Opening in view mode.")
                         read_only = True
 
-            dlg = QDialog(self);
+            dlg = QDialog(self)
             dlg.setWindowTitle("Salary Review")
             lay = QVBoxLayout(dlg)
 
@@ -718,13 +739,13 @@ class SalaryModuleWidget(QWidget):
                       ORDER BY e.full_name COLLATE NOCASE ASC
                     """), {"b": batch_id}).fetchall()
                 for ln in lines:
-                    r = grid.rowCount();
+                    r = grid.rowCount()
                     grid.insertRow(r)
                     vals = [
                         ln.full_name, ln.basic_salary, ln.commission, ln.incentives, ln.allowance,
                         ln.overtime_rate, ln.overtime_hours, ln.part_time_rate, ln.part_time_hours,
                         ln.basic_salary + ln.commission + ln.incentives + ln.allowance + (
-                                    ln.overtime_rate * ln.overtime_hours) + (ln.part_time_rate * ln.part_time_hours),
+                                ln.overtime_rate * ln.overtime_hours) + (ln.part_time_rate * ln.part_time_hours),
                         ln.levy, ln.shg, ln.sdl, ln.cpf_emp, ln.cpf_er, ln.cpf_total, ln.ee_contrib, ln.er_contrib,
                         ln.total_cash
                     ]
@@ -742,35 +763,33 @@ class SalaryModuleWidget(QWidget):
                 emps = _active_employees(y, m)
                 emps.sort(key=lambda e: (e.full_name or "").lower())
                 for e in emps:
-                    r = grid.rowCount();
+                    r = grid.rowCount()
                     grid.insertRow(r)
 
                     def num(x):
-                        it = QTableWidgetItem(f"{float(x):,.2f}");
-                        it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter);
+                        it = QTableWidgetItem(f"{float(x):,.2f}")
+                        it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                         return it
 
-                    # defaults from employee
                     name = QTableWidgetItem(e.full_name or "")
-                    for c in range(len(COLS)):  # init row
+                    for c in range(len(COLS)):
                         grid.setItem(r, c, QTableWidgetItem(""))
                     grid.setItem(r, 0, name)
                     grid.setItem(r, 1, num(getattr(e, "basic_salary", 0.0)))
-                    grid.setItem(r, 2, num(0.0))  # commission blank
+                    grid.setItem(r, 2, num(0.0))
                     grid.setItem(r, 3, num(getattr(e, "incentives", 0.0)))
                     grid.setItem(r, 4, num(getattr(e, "allowance", 0.0)))
                     grid.setItem(r, 5, num(getattr(e, "overtime_rate", 0.0)))
-                    grid.setItem(r, 6, num(0.0))  # OT hours
+                    grid.setItem(r, 6, num(0.0))
                     grid.setItem(r, 7, num(getattr(e, "parttime_rate", 0.0)))
-                    grid.setItem(r, 8, num(0.0))  # PT hours
+                    grid.setItem(r, 8, num(0.0))
                     grid.setItem(r, 10, num(getattr(e, "levy", 0.0)))
-                    # computed cells will be filled by recalc
                     for c in range(len(COLS)):
                         if c in EDITABLE:
-                            it = grid.item(r, c);
+                            it = grid.item(r, c)
                             it.setFlags(it.flags() | Qt.ItemIsEditable)
                         else:
-                            it = grid.item(r, c);
+                            it = grid.item(r, c)
                             it.setFlags(it.flags() & ~Qt.ItemIsEditable)
                     row_emps.append(e)
 
@@ -794,7 +813,6 @@ class SalaryModuleWidget(QWidget):
                 btn_submit = btns.addButton("Submit", QDialogButtonBox.ActionRole)
                 btn_close = btns.addButton(QDialogButtonBox.Close)
                 btn_submit.setToolTip("Lock this period. No further edits.")
-
             lay.addWidget(btns)
 
             def _persist(status=None):
@@ -817,8 +835,6 @@ class SalaryModuleWidget(QWidget):
 
                     # insert lines
                     for r in range(grid.rowCount()):
-                        name = grid.item(r, 0).text() if grid.item(r, 0) else ""
-                        # find employee by name (stable since we built from objects)
                         emp = row_emps[r]
                         vals = [grid.item(r, c).text() if grid.item(r, c) else "0" for c in range(1, len(COLS))]
                         nums = [_rf(v) for v in vals]
@@ -848,13 +864,13 @@ class SalaryModuleWidget(QWidget):
                 role = btns.buttonRole(btn)
                 text_btn = btn.text().lower()
                 if "save" in text_btn:
-                    _persist("Draft");
+                    _persist("Draft")
                     QMessageBox.information(dlg, "Salary Review", "Saved.")
                     _load_batches()
                 elif "submit" in text_btn:
-                    _persist("Submitted");
+                    _persist("Submitted")
                     QMessageBox.information(dlg, "Salary Review", "Submitted and locked.")
-                    _load_batches();
+                    _load_batches()
                     dlg.accept()
                 else:
                     dlg.reject()
@@ -867,7 +883,7 @@ class SalaryModuleWidget(QWidget):
 
         # ---------- toolbar actions ----------
         def _create():
-            y = int(cb_year.currentText());
+            y = int(cb_year.currentText())
             m = cb_month.currentIndex() + 1
             _open_batch_dialog(None, False, y, m)
 
@@ -891,7 +907,7 @@ class SalaryModuleWidget(QWidget):
                 QMessageBox.information(host, "Salary Review", "Select a batch.")
                 return
             with SessionLocal() as s:
-                s.execute(text("UPDATE payroll_batches SET status='Submitted' WHERE id=:i"), {"i": bid});
+                s.execute(text("UPDATE payroll_batches SET status='Submitted' WHERE id=:i"), {"i": bid})
                 s.commit()
             _load_batches()
 
@@ -924,7 +940,8 @@ class SalaryModuleWidget(QWidget):
         self.v_emp = QComboBox()
         for emp_id, name, code in _employees():
             self.v_emp.addItem(f"{name} ({code})", emp_id)
-        self.v_month = QComboBox(); self.v_month.addItems(_month_names())
+        self.v_month = QComboBox()
+        self.v_month.addItems(_month_names())
         self.v_year = QComboBox()
         this_year = date.today().year
         self.v_year.addItems([str(y) for y in range(this_year - 5, this_year + 6)])
@@ -942,22 +959,25 @@ class SalaryModuleWidget(QWidget):
         ctrl.addWidget(self.btn_pdf)
         v.addLayout(ctrl)
 
-        # centered, non-stretch preview
+        # centered, thin-border, scrollable preview
         wrap = QHBoxLayout()
         wrap.addStretch(1)
-        self.v_preview = QTextEdit()
-        self.v_preview.setReadOnly(True)
-        self.v_preview.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        self.v_preview.setMinimumWidth(820)
-        self.v_preview.setMaximumWidth(820)
-        self.v_preview.setMinimumHeight(900)
-        wrap.addWidget(self.v_preview)
+
+        self.v_preview = QTextBrowser()
+        self.v_preview.setOpenExternalLinks(True)
+        self.v_preview.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.v_preview.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.v_preview.setFrameShape(QFrame.NoFrame)
+        self.v_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.v_preview.setMinimumWidth(780)
+        self.v_preview.setMinimumHeight(700)
+
+        wrap.addWidget(self.v_preview, 1)
         wrap.addStretch(1)
         v.addLayout(wrap)
 
         self.tabs.addTab(host, "Salary Vouchers")
 
-        # react
         self.v_emp.currentIndexChanged.connect(self._refresh_voucher_preview)
         self.v_month.currentIndexChanged.connect(self._refresh_voucher_preview)
         self.v_year.currentIndexChanged.connect(self._refresh_voucher_preview)
@@ -973,8 +993,6 @@ class SalaryModuleWidget(QWidget):
         self.v_preview.setHtml(html)
 
     def _export_voucher_pdf(self):
-        from PySide6.QtGui import QFont
-
         emp_label = self.v_emp.currentText() or "employee"
         m1 = self.v_month.currentIndex() + 1
         y = int(self.v_year.currentText())
@@ -984,6 +1002,7 @@ class SalaryModuleWidget(QWidget):
         if not path:
             return
 
+        # upscale readability
         html = self.v_preview.toHtml().replace(
             "<head>",
             "<head><style>@page{size:A4;margin:12mm 10mm;} html,body{font-size:12pt;}</style>"
@@ -994,7 +1013,7 @@ class SalaryModuleWidget(QWidget):
         doc.setHtml(html)
 
         printer = QPrinter(QPrinter.HighResolution)
-        printer.setResolution(150)  # good readability without scaling down text
+        printer.setResolution(150)
         printer.setOutputFormat(QPrinter.PdfFormat)
         printer.setPageLayout(QPageLayout(QPageSize(QPageSize.A4),
                                           QPageLayout.Portrait,
@@ -1005,12 +1024,6 @@ class SalaryModuleWidget(QWidget):
 
     # -- Settings
     def _build_settings_tab(self):
-        from PySide6.QtCore import Qt
-        from PySide6.QtWidgets import (
-            QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout, QLabel,
-            QLineEdit, QPushButton, QTableWidget, QTableWidgetItem, QHeaderView,
-            QFileDialog, QMessageBox, QScrollArea, QFrame, QSizePolicy
-        )
         from sqlalchemy import text
         import csv, re
 
@@ -1042,7 +1055,6 @@ class SalaryModuleWidget(QWidget):
                   rule TEXT NOT NULL
                 )"""))
                 s.commit()
-
         _ensure_settings_tables()
 
         # ---------- helpers ----------
@@ -1064,7 +1076,7 @@ class SalaryModuleWidget(QWidget):
             path, _ = QFileDialog.getSaveFileName(self, f"Export {title}", f"{title}.csv", "CSV Files (*.csv)")
             if not path: return
             with open(path, "w", newline="", encoding="utf-8") as f:
-                w = csv.writer(f);
+                w = csv.writer(f)
                 w.writerow(headers)
                 for r in range(tbl.rowCount()):
                     w.writerow([(tbl.item(r, c).text() if tbl.item(r, c) else "") for c in range(tbl.columnCount())])
@@ -1078,69 +1090,20 @@ class SalaryModuleWidget(QWidget):
             hdr = [h.strip() for h in rows[0]]
             if [h.lower() for h in hdr] != [h.lower() for h in headers]:
                 QMessageBox.warning(self, "Import", f"Header mismatch.\nExpected: {headers}\nGot: {hdr}")
-            return
+                return
             tbl.setRowCount(0)
             for data in rows[1:]:
-                r = tbl.rowCount();
+                r = tbl.rowCount()
                 tbl.insertRow(r)
                 for c, val in enumerate(data[:len(headers)]):
                     tbl.setItem(r, c, QTableWidgetItem(val))
 
         def _csv_template(headers, title):
-            path, _ = QFileDialog.getSaveFileName(self, f"{title} CSV Template", f"{title}_template.csv",
-                                                  "CSV Files (*.csv)")
+            path, _ = QFileDialog.getSaveFileName(self, f"{title} CSV Template", f"{title}_template.csv", "CSV Files (*.csv)")
             if not path: return
             with open(path, "w", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow(headers)
             QMessageBox.information(self, "Template", f"Created: {path}")
-
-        # ---------- validators ----------
-        def _validate_cpf(tbl):
-            errs = []
-            for r in range(tbl.rowCount()):
-                age = (tbl.item(r, 0).text().strip() if tbl.item(r, 0) else "")
-                resid = (tbl.item(r, 1).text().strip() if tbl.item(r, 1) else "")
-                ee = _rf(tbl.item(r, 2).text() if tbl.item(r, 2) else "0")
-                er = _rf(tbl.item(r, 3).text() if tbl.item(r, 3) else "0")
-                cap = _rf(tbl.item(r, 4).text() if tbl.item(r, 4) else "0")
-                if not age or not resid: errs.append(f"Row {r + 1}: missing Age/Residency")
-                if ee < 0 or er < 0: errs.append(f"Row {r + 1}: negative %")
-                if cap < 0: errs.append(f"Row {r + 1}: negative ceiling")
-                if age and not re.match(r"^(<=?\d+|>=?\d+|\d+\-\d+|>\d+)$", age.replace(" ", "")):
-                    errs.append(f"Row {r + 1}: age bracket format")
-            return errs
-
-        def _validate_shg(tbl):
-            errs = []
-            for r in range(tbl.rowCount()):
-                race = (tbl.item(r, 0).text().strip().lower() if tbl.item(r, 0) else "")
-                lo = _rf(tbl.item(r, 1).text() if tbl.item(r, 1) else "0")
-                hi = _rf(tbl.item(r, 2).text() if tbl.item(r, 2) else "0")
-                val = _rf(tbl.item(r, 3).text() if tbl.item(r, 3) else "0")
-                if not race: errs.append(f"Row {r + 1}: missing race")
-                if lo < 0 or hi < 0 or val < 0: errs.append(f"Row {r + 1}: negative number")
-                if hi and hi < lo: errs.append(f"Row {r + 1}: income_to < income_from")
-            return errs
-
-        def _validate_sdl(tbl):
-            errs = []
-            for r in range(tbl.rowCount()):
-                lo = _rf(tbl.item(r, 0).text() if tbl.item(r, 0) else "0")
-                hi = _rf(tbl.item(r, 1).text() if tbl.item(r, 1) else "0")
-                rule = (tbl.item(r, 2).text().strip().lower() if tbl.item(r, 2) else "")
-                if hi and hi < lo: errs.append(f"Row {r + 1}: salary_to < salary_from")
-                if not rule: errs.append(f"Row {r + 1}: missing rule"); continue
-                if rule.startswith("flat:"):
-                    try:
-                        float(rule.split(":", 1)[1].strip())
-                    except:
-                        errs.append(f"Row {r + 1}: flat format")
-                else:
-                    try:
-                        _ = _rf(rule)
-                    except:
-                        errs.append(f"Row {r + 1}: percent format")
-            return errs
 
         # ---------- SCROLL AREA AS TAB ----------
         sa = QScrollArea()
@@ -1155,29 +1118,27 @@ class SalaryModuleWidget(QWidget):
         v.setSpacing(12)
         inner.setContentsMargins(12, 12, 12, 12)
 
-        # ---------- Voucher Settings (with Apply) ----------
+        # ---------- Voucher Settings (format + company stamp) ----------
         voucher_box = QGroupBox("Voucher Settings")
         f_v = QFormLayout(voucher_box)
 
-        if not hasattr(self, "_voucher_fmt"):
-            self._voucher_fmt = globals().get("_VOUCHER_FMT", "SV-{YYYY}{MM}-{EMP}")
-
-        self.voucher_format = QLineEdit(self._voucher_fmt)
+        # voucher code format
+        self.voucher_format = QLineEdit(globals().get("_VOUCHER_FMT", "SV-{YYYY}{MM}-{EMP}"))
         self.voucher_format.setMaximumWidth(340)
         self.voucher_preview = QLabel("")
-        btn_preview = QPushButton("Preview");
-        btn_preview.setMaximumWidth(120)
-        btn_apply = QPushButton("Apply");
-        btn_apply.setMaximumWidth(120)
+        btn_preview = QPushButton("Preview"); btn_preview.setMaximumWidth(120)
+        btn_apply   = QPushButton("Apply");   btn_apply.setMaximumWidth(120)
 
         def _preview_code():
             sample = (self.voucher_format.text() or "SV-{YYYY}{MM}-{EMP}")
-            code = (sample.replace("{YYYY}", "2025").replace("{MM}", "01").replace("{EMP}", "EMP001"))
+            code = (sample.replace("{YYYY}", "2025")
+                          .replace("{MM}", "01")
+                          .replace("{EMP}", "EMP001"))
             self.voucher_preview.setText(f"Preview: {code}")
 
         def _apply_format():
-            self._voucher_fmt = (self.voucher_format.text().strip() or "SV-{YYYY}{MM}-{EMP}")
-            globals()["_VOUCHER_FMT"] = self._voucher_fmt
+            fmt = (self.voucher_format.text().strip() or "SV-{YYYY}{MM}-{EMP}")
+            globals()["_VOUCHER_FMT"] = fmt
             _preview_code()
             try:
                 self._refresh_voucher_preview()
@@ -1187,46 +1148,117 @@ class SalaryModuleWidget(QWidget):
         btn_preview.clicked.connect(_preview_code)
         btn_apply.clicked.connect(_apply_format)
 
-        row_fmt = QHBoxLayout();
-        row_fmt.addWidget(btn_preview);
-        row_fmt.addWidget(btn_apply);
+        row_fmt = QHBoxLayout()
+        row_fmt.addWidget(btn_preview)
+        row_fmt.addWidget(btn_apply)
         row_fmt.addStretch(1)
         f_v.addRow("Format", self.voucher_format)
         f_v.addRow("", row_fmt)
         f_v.addRow("", self.voucher_preview)
+
+        # company stamp upload
+        stamp_row = QHBoxLayout()
+        self.stamp_preview = QLabel("No stamp")
+        self.stamp_preview.setMinimumSize(120, 60)
+        self.stamp_preview.setStyleSheet("border:1px solid #ddd; padding:4px;")
+        btn_up = QPushButton("Upload Stamp")
+        btn_cl = QPushButton("Clear")
+        btn_up.setMaximumWidth(140)
+        btn_cl.setMaximumWidth(120)
+
+        def _refresh_stamp_preview_from_b64(b64: Optional[str]):
+            if not b64:
+                self.stamp_preview.setText("No stamp")
+                self.stamp_preview.setPixmap(QPixmap())
+                return
+            pix = QPixmap()
+            pix.loadFromData(base64.b64decode(b64))
+            self.stamp_preview.setPixmap(pix.scaled(140, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.stamp_preview.setText("")
+
+        def _upload_stamp():
+            path, _ = QFileDialog.getOpenFileName(self, "Select Company Stamp", "", "Images (*.png *.jpg *.jpeg)")
+            if not path:
+                return
+            try:
+                with open(path, "rb") as f:
+                    raw = f.read()
+                b64 = base64.b64encode(raw).decode("ascii")
+                self._company_stamp_b64 = b64
+                globals()["_STAMP_B64"] = b64
+                # try persist if CompanySettings.stamp exists
+                try:
+                    with SessionLocal() as s:
+                        cs = s.query(CompanySettings).first()
+                        if cs is not None and hasattr(cs, "stamp"):
+                            setattr(cs, "stamp", raw)
+                            s.commit()
+                except Exception:
+                    pass
+                _refresh_stamp_preview_from_b64(b64)
+                try:
+                    self._refresh_voucher_preview()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        def _clear_stamp():
+            self._company_stamp_b64 = None
+            globals()["_STAMP_B64"] = None
+            # try clear in DB if field exists
+            try:
+                with SessionLocal() as s:
+                    cs = s.query(CompanySettings).first()
+                    if cs is not None and hasattr(cs, "stamp"):
+                        setattr(cs, "stamp", None)
+                        s.commit()
+            except Exception:
+                pass
+            _refresh_stamp_preview_from_b64(None)
+            try:
+                self._refresh_voucher_preview()
+            except Exception:
+                pass
+
+        btn_up.clicked.connect(_upload_stamp)
+        btn_cl.clicked.connect(_clear_stamp)
+
+        stamp_row.addWidget(self.stamp_preview)
+        stamp_row.addSpacing(10)
+        stamp_row.addWidget(btn_up)
+        stamp_row.addWidget(btn_cl)
+        stamp_row.addStretch(1)
+        f_v.addRow("Company Stamp", stamp_row)
+
         v.addWidget(voucher_box)
         _preview_code()
+        _refresh_stamp_preview_from_b64(self._company_stamp_b64)
 
         # ---------- CPF ----------
         cpf_headers = ["Age Bracket", "Residency", "Employee %", "Employer %", "Wage Ceiling"]
         cpf_box = QGroupBox("CPF Rules")
         cpf_v = QVBoxLayout(cpf_box)
-        cpf_hint = QLabel(
-            "Age: <=55, >55-60, >=65 etc. Residency: Citizen/SPR 3+ yr, PR Y1 G/G, PR Y2 G/G, PR Y1 F/G, PR Y2 F/G.")
-        cpf_hint.setStyleSheet("color:#6b7280;");
+        cpf_hint = QLabel("Age: <=55, >55-60, >=65 etc. Residency: Citizen/SPR 3+ yr, PR Y1 G/G, PR Y2 G/G, PR Y1 F/G, PR Y2 F/G.")
+        cpf_hint.setStyleSheet("color:#6b7280;")
         cpf_v.addWidget(cpf_hint)
-        self.cpf_tbl = _mk_table(cpf_headers);
+        self.cpf_tbl = _mk_table(cpf_headers)
         cpf_v.addWidget(self.cpf_tbl)
         row = QHBoxLayout()
-        b_add = QPushButton("Add");
-        b_del = QPushButton("Delete")
-        b_imp = QPushButton("Import CSV");
-        b_exp = QPushButton("Export CSV")
-        b_tpl = QPushButton("CSV Template");
-        b_val = QPushButton("Validate")
+        b_add = QPushButton("Add"); b_del = QPushButton("Delete")
+        b_imp = QPushButton("Import CSV"); b_exp = QPushButton("Export CSV")
+        b_tpl = QPushButton("CSV Template"); b_val = QPushButton("Validate")
         for b in (b_add, b_del): row.addWidget(b)
         row.addStretch(1)
         for b in (b_imp, b_exp, b_tpl, b_val): row.addWidget(b)
         cpf_v.addLayout(row)
         b_add.clicked.connect(lambda: self.cpf_tbl.insertRow(self.cpf_tbl.rowCount()))
-        b_del.clicked.connect(lambda: [self.cpf_tbl.removeRow(r) for r in
-                                       sorted({ix.row() for ix in self.cpf_tbl.selectedIndexes()}, reverse=True)])
+        b_del.clicked.connect(lambda: [self.cpf_tbl.removeRow(r) for r in sorted({ix.row() for ix in self.cpf_tbl.selectedIndexes()}, reverse=True)])
         b_imp.clicked.connect(lambda: _csv_import(self.cpf_tbl, cpf_headers, "CPF"))
         b_exp.clicked.connect(lambda: _csv_export(self.cpf_tbl, cpf_headers, "CPF"))
         b_tpl.clicked.connect(lambda: _csv_template(cpf_headers, "CPF"))
         b_val.clicked.connect(lambda: QMessageBox.information(self, "CPF Validate",
-                                                              "OK" if not _validate_cpf(self.cpf_tbl) else "\n".join(
-                                                                  _validate_cpf(self.cpf_tbl))))
+                        "OK" if not _validate_cpf(self.cpf_tbl) else "\n".join(_validate_cpf(self.cpf_tbl))))
         v.addWidget(cpf_box)
 
         # ---------- SHG ----------
@@ -1234,30 +1266,25 @@ class SalaryModuleWidget(QWidget):
         shg_box = QGroupBox("SHG Rules")
         shg_v = QVBoxLayout(shg_box)
         shg_hint = QLabel("Race: chinese|indian|eurasian|muslim (or 'any'). Contribution is flat amount.")
-        shg_hint.setStyleSheet("color:#6b7280;");
+        shg_hint.setStyleSheet("color:#6b7280;")
         shg_v.addWidget(shg_hint)
-        self.shg_tbl = _mk_table(shg_headers);
+        self.shg_tbl = _mk_table(shg_headers)
         shg_v.addWidget(self.shg_tbl)
         row2 = QHBoxLayout()
-        s_add = QPushButton("Add");
-        s_del = QPushButton("Delete")
-        s_imp = QPushButton("Import CSV");
-        s_exp = QPushButton("Export CSV")
-        s_tpl = QPushButton("CSV Template");
-        s_val = QPushButton("Validate")
+        s_add = QPushButton("Add"); s_del = QPushButton("Delete")
+        s_imp = QPushButton("Import CSV"); s_exp = QPushButton("Export CSV")
+        s_tpl = QPushButton("CSV Template"); s_val = QPushButton("Validate")
         for b in (s_add, s_del): row2.addWidget(b)
         row2.addStretch(1)
         for b in (s_imp, s_exp, s_tpl, s_val): row2.addWidget(b)
         shg_v.addLayout(row2)
         s_add.clicked.connect(lambda: self.shg_tbl.insertRow(self.shg_tbl.rowCount()))
-        s_del.clicked.connect(lambda: [self.shg_tbl.removeRow(r) for r in
-                                       sorted({ix.row() for ix in self.shg_tbl.selectedIndexes()}, reverse=True)])
+        s_del.clicked.connect(lambda: [self.shg_tbl.removeRow(r) for r in sorted({ix.row() for ix in self.shg_tbl.selectedIndexes()}, reverse=True)])
         s_imp.clicked.connect(lambda: _csv_import(self.shg_tbl, shg_headers, "SHG"))
         s_exp.clicked.connect(lambda: _csv_export(self.shg_tbl, shg_headers, "SHG"))
         s_tpl.clicked.connect(lambda: _csv_template(shg_headers, "SHG"))
         s_val.clicked.connect(lambda: QMessageBox.information(self, "SHG Validate",
-                                                              "OK" if not _validate_shg(self.shg_tbl) else "\n".join(
-                                                                  _validate_shg(self.shg_tbl))))
+                        "OK" if not _validate_shg(self.shg_tbl) else "\n".join(_validate_shg(self.shg_tbl))))
         v.addWidget(shg_box)
 
         # ---------- SDL ----------
@@ -1265,116 +1292,103 @@ class SalaryModuleWidget(QWidget):
         sdl_box = QGroupBox("SDL Rules")
         sdl_v = QVBoxLayout(sdl_box)
         sdl_hint = QLabel("Use percent like 0.25% or 0.25. Or flat like 'flat: 11.25'.")
-        sdl_hint.setStyleSheet("color:#6b7280;");
+        sdl_hint.setStyleSheet("color:#6b7280;")
         sdl_v.addWidget(sdl_hint)
-        self.sdl_tbl = _mk_table(sdl_headers);
+        self.sdl_tbl = _mk_table(sdl_headers)
         sdl_v.addWidget(self.sdl_tbl)
         row3 = QHBoxLayout()
-        d_add = QPushButton("Add");
-        d_del = QPushButton("Delete")
-        d_imp = QPushButton("Import CSV");
-        d_exp = QPushButton("Export CSV")
-        d_tpl = QPushButton("CSV Template");
-        d_val = QPushButton("Validate")
+        d_add = QPushButton("Add"); d_del = QPushButton("Delete")
+        d_imp = QPushButton("Import CSV"); d_exp = QPushButton("Export CSV")
+        d_tpl = QPushButton("CSV Template"); d_val = QPushButton("Validate")
         for b in (d_add, d_del): row3.addWidget(b)
         row3.addStretch(1)
         for b in (d_imp, d_exp, d_tpl, d_val): row3.addWidget(b)
         sdl_v.addLayout(row3)
         d_add.clicked.connect(lambda: self.sdl_tbl.insertRow(self.sdl_tbl.rowCount()))
-        d_del.clicked.connect(lambda: [self.sdl_tbl.removeRow(r) for r in
-                                       sorted({ix.row() for ix in self.sdl_tbl.selectedIndexes()}, reverse=True)])
+        d_del.clicked.connect(lambda: [self.sdl_tbl.removeRow(r) for r in sorted({ix.row() for ix in self.sdl_tbl.selectedIndexes()}, reverse=True)])
         d_imp.clicked.connect(lambda: _csv_import(self.sdl_tbl, sdl_headers, "SDL"))
         d_exp.clicked.connect(lambda: _csv_export(self.sdl_tbl, sdl_headers, "SDL"))
         d_tpl.clicked.connect(lambda: _csv_template(sdl_headers, "SDL"))
         d_val.clicked.connect(lambda: QMessageBox.information(self, "SDL Validate",
-                                                              "OK" if not _validate_sdl(self.sdl_tbl) else "\n".join(
-                                                                  _validate_sdl(self.sdl_tbl))))
+                        "OK" if not _validate_sdl(self.sdl_tbl) else "\n".join(_validate_sdl(self.sdl_tbl))))
         v.addWidget(sdl_box)
 
-        # ---------- persistence ----------
-        ctrl = QGroupBox("Presets and Persistence")
-        f2 = QFormLayout(ctrl)
-        rowp = QHBoxLayout()
-        btn_load_db = QPushButton("Load from DB");
-        btn_save_db = QPushButton("Save to DB");
-        btn_clear = QPushButton("Clear tables")
-        rowp.addWidget(btn_load_db);
-        rowp.addWidget(btn_save_db);
-        rowp.addStretch(1);
-        rowp.addWidget(btn_clear)
-        f2.addRow(rowp)
-
-        def _load_db():
-            self.cpf_tbl.setRowCount(0);
-            self.shg_tbl.setRowCount(0);
-            self.sdl_tbl.setRowCount(0)
-            with SessionLocal() as s:
-                for age, res, ee, er, cap in s.execute(
-                        text("SELECT age_bracket,residency,ee_pct,er_pct,wage_ceiling FROM cpf_rules ORDER BY id")):
-                    r = self.cpf_tbl.rowCount();
-                    self.cpf_tbl.insertRow(r)
-                    for c, v in enumerate([age, res, ee, er, cap]): self.cpf_tbl.setItem(r, c, QTableWidgetItem(str(v)))
-                for race, lo, hi, val in s.execute(
-                        text("SELECT race,income_from,income_to,contribution FROM shg_rules ORDER BY id")):
-                    r = self.shg_tbl.rowCount();
-                    self.shg_tbl.insertRow(r)
-                    for c, v in enumerate([race, lo, hi, val]): self.shg_tbl.setItem(r, c, QTableWidgetItem(str(v)))
-                for lo, hi, rule in s.execute(text("SELECT salary_from,salary_to,rule FROM sdl_rules ORDER BY id")):
-                    r = self.sdl_tbl.rowCount();
-                    self.sdl_tbl.insertRow(r)
-                    for c, v in enumerate([lo, hi, rule]): self.sdl_tbl.setItem(r, c, QTableWidgetItem(str(v)))
-
-        def _save_db():
-            e1 = _validate_cpf(self.cpf_tbl);
-            e2 = _validate_shg(self.shg_tbl);
-            e3 = _validate_sdl(self.sdl_tbl)
-            if e1 or e2 or e3:
-                QMessageBox.warning(self, "Validate", "Fix errors before save:\n" + "\n".join(e1 + e2 + e3));
-                return
-            with SessionLocal() as s:
-                s.execute(text("DELETE FROM cpf_rules"))
-                s.execute(text("DELETE FROM shg_rules"))
-                s.execute(text("DELETE FROM sdl_rules"))
-                for r in range(self.cpf_tbl.rowCount()):
-                    vals = [self.cpf_tbl.item(r, c).text().strip() if self.cpf_tbl.item(r, c) else "" for c in range(5)]
-                    if not vals[0] or not vals[1]: continue
-                    s.execute(text("""INSERT INTO cpf_rules(age_bracket,residency,ee_pct,er_pct,wage_ceiling)
-                                      VALUES(:a,:r,:ee,:er,:wc)"""),
-                              {"a": vals[0], "r": vals[1], "ee": _rf(vals[2]), "er": _rf(vals[3]), "wc": _rf(vals[4])})
-                for r in range(self.shg_tbl.rowCount()):
-                    vals = [self.shg_tbl.item(r, c).text().strip() if self.shg_tbl.item(r, c) else "" for c in range(4)]
-                    if not vals[0]: continue
-                    s.execute(text("""INSERT INTO shg_rules(race,income_from,income_to,contribution)
-                                      VALUES(:race,:lo,:hi,:val)"""),
-                              {"race": vals[0].lower(), "lo": _rf(vals[1]), "hi": _rf(vals[2]), "val": _rf(vals[3])})
-                for r in range(self.sdl_tbl.rowCount()):
-                    vals = [self.sdl_tbl.item(r, c).text().strip() if self.sdl_tbl.item(r, c) else "" for c in range(3)]
-                    if not vals[2]: continue
-                    s.execute(text("""INSERT INTO sdl_rules(salary_from,salary_to,rule)
-                                      VALUES(:lo,:hi,:rule)"""),
-                              {"lo": _rf(vals[0]), "hi": _rf(vals[1]), "rule": vals[2]})
-                s.commit()
-            QMessageBox.information(self, "Settings", "Saved to DB.")
-
-        def _clear_tables():
-            self.cpf_tbl.setRowCount(0);
-            self.shg_tbl.setRowCount(0);
-            self.sdl_tbl.setRowCount(0)
-
-        btn_load_db.clicked.connect(_load_db)
-        btn_save_db.clicked.connect(_save_db)
-        btn_clear.clicked.connect(_clear_tables)
-
-        v.addWidget(ctrl)
-        v.addStretch(1)
-
-        # mount scroll area as the tab
+        # ---------- mount scroll area ----------
         sa.setWidget(inner)
         self.tabs.addTab(sa, "Settings")
 
-        # initial load + preview
-        _load_db()
+        # initial preview
         try:
             _preview_code()
         except Exception:
             pass
+
+
+# ---- validators used in Settings (defined at end for clarity) ----
+from PySide6.QtWidgets import QMessageBox  # local import used above
+
+
+def _validate_cpf(tbl):
+    import re
+    errs = []
+    for r in range(tbl.rowCount()):
+        age = (tbl.item(r, 0).text().strip() if tbl.item(r, 0) else "")
+        resid = (tbl.item(r, 1).text().strip() if tbl.item(r, 1) else "")
+        try:
+            ee = float(str(tbl.item(r, 2).text() if tbl.item(r, 2) else "0").replace(",", "").replace("%", "").strip())
+            er = float(str(tbl.item(r, 3).text() if tbl.item(r, 3) else "0").replace(",", "").replace("%", "").strip())
+            cap = float(str(tbl.item(r, 4).text() if tbl.item(r, 4) else "0").replace(",", "").strip())
+        except Exception:
+            ee = er = cap = 0.0
+        if not age or not resid: errs.append(f"Row {r + 1}: missing Age/Residency")
+        if ee < 0 or er < 0: errs.append(f"Row {r + 1}: negative %")
+        if cap < 0: errs.append(f"Row {r + 1}: negative ceiling")
+        if age and not re.match(r"^(<=?\d+|>=?\d+|\d+\-\d+|>\d+)$", age.replace(" ", "")):
+            errs.append(f"Row {r + 1}: age bracket format")
+    return errs
+
+
+def _validate_shg(tbl):
+    errs = []
+    def rf(x):
+        try:
+            return float(str(x).replace(",", "").strip())
+        except Exception:
+            return 0.0
+    for r in range(tbl.rowCount()):
+        race = (tbl.item(r, 0).text().strip().lower() if tbl.item(r, 0) else "")
+        lo = rf(tbl.item(r, 1).text() if tbl.item(r, 1) else "0")
+        hi = rf(tbl.item(r, 2).text() if tbl.item(r, 2) else "0")
+        val = rf(tbl.item(r, 3).text() if tbl.item(r, 3) else "0")
+        if not race: errs.append(f"Row {r + 1}: missing race")
+        if lo < 0 or hi < 0 or val < 0: errs.append(f"Row {r + 1}: negative number")
+        if hi and hi < lo: errs.append(f"Row {r + 1}: income_to < income_from")
+    return errs
+
+
+def _validate_sdl(tbl):
+    errs = []
+    def rf(x):
+        try:
+            return float(str(x).replace(",", "").replace("%", "").strip())
+        except Exception:
+            return 0.0
+    for r in range(tbl.rowCount()):
+        lo = rf(tbl.item(r, 0).text() if tbl.item(r, 0) else "0")
+        hi = rf(tbl.item(r, 1).text() if tbl.item(r, 1) else "0")
+        rule = (tbl.item(r, 2).text().strip().lower() if tbl.item(r, 2) else "")
+        if hi and hi < lo: errs.append(f"Row {r + 1}: salary_to < salary_from")
+        if not rule:
+            errs.append(f"Row {r + 1}: missing rule")
+            continue
+        if rule.startswith("flat:"):
+            try:
+                float(rule.split(":", 1)[1].strip())
+            except Exception:
+                errs.append(f"Row {r + 1}: flat format")
+        else:
+            try:
+                _ = rf(rule)
+            except Exception:
+                errs.append(f"Row {r + 1}: percent format")
+    return errs
