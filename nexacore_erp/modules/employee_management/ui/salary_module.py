@@ -6,8 +6,8 @@ from calendar import month_name
 from datetime import date
 from typing import List, Tuple
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QTextDocument
+from PySide6.QtCore import Qt, QMarginsF
+from PySide6.QtGui import QTextDocument, QPageSize, QPageLayout
 from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import (
     QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QTableWidget,
@@ -27,10 +27,10 @@ def _img_data_uri(png_bytes: bytes | None, fallback_label: str = "Logo") -> str:
         b64 = base64.b64encode(png_bytes).decode("ascii")
         return (
             "<img src=\"data:image/png;base64,"
-            f"{b64}\" style=\"max-height:48px;max-width:120px;object-fit:contain;\"/>"
+            f"{b64}\" style=\"max-height:64px;max-width:160px;object-fit:contain;\"/>"
         )
     return (
-        "<div style=\"height:48px;width:120px;border:1px solid #cfcfcf;border-radius:6px;"
+        "<div style=\"height:64px;width:160px;border:1px solid #cfcfcf;border-radius:6px;"
         "display:flex;align-items:center;justify-content:center;color:#9aa0a6;font-size:12px;\">"
         f"{fallback_label}</div>"
     )
@@ -57,9 +57,7 @@ def _company() -> CompanySettings | None:
 
 
 def _voucher_html(cs: CompanySettings | None, emp: Employee | None, year: int, month_index_1: int) -> str:
-    from calendar import month_name
     import html
-
     # company
     company_name = (cs.name if cs else "") or "Company Name"
     detail1 = (cs.detail1 if cs else "") or "Company details line 1"
@@ -74,151 +72,167 @@ def _voucher_html(cs: CompanySettings | None, emp: Employee | None, year: int, m
     bank     = getattr(emp, "bank", "") or "—"
     acct     = getattr(emp, "bank_account", "") or "—"
 
-    # amounts (placeholders until review is wired)
+    # figures (placeholders until wired)
     basic   = float(getattr(emp, "basic_salary", 0.0) or 0.0)
-    comm    = 0.0
+    comm    = float(getattr(emp, "commission", 0.0) or 0.0)
     incent  = float(getattr(emp, "incentives", 0.0) or 0.0)
     allow   = float(getattr(emp, "allowance", 0.0) or 0.0)
-    ot_rate = float(getattr(emp, "overtime_rate", 0.0) or 0.0); ot_hrs = 0.0; ot_amt = ot_rate * ot_hrs
-    pt_rate = float(getattr(emp, "parttime_rate", 0.0) or 0.0); pt_hrs = 0.0; pt_amt = pt_rate * pt_hrs
-    levy    = float(getattr(emp, "levy", 0.0) or 0.0)
 
-    gross = basic + comm + incent + allow + ot_amt + pt_amt
-    emp_cpf = 0.0; shg = 0.0; sdl = 0.0
-    deductions = emp_cpf + shg + sdl + levy
-    net_pay = max(0.0, gross - deductions)
+    ot_rate = float(getattr(emp, "overtime_rate", 0.0) or 0.0)
+    ot_hrs  = float(getattr(emp, "overtime_hours", 0.0) or 0.0); ot_amt = ot_rate * ot_hrs
+    pt_rate = float(getattr(emp, "parttime_rate", 0.0) or 0.0)
+    pt_hrs  = float(getattr(emp, "part_time_hours", 0.0) or 0.0); pt_amt = pt_rate * pt_hrs
 
-    ym   = f"{month_name[month_index_1]} {year}"
-    code = f"SV-{year}{month_index_1:02d}-{(emp.code or 'TST-0001') if emp else 'TST-0001'}"
+    cpf_er  = float(getattr(emp, "cpf_employer", 0.0) or 0.0)   # income
+    sdl     = float(getattr(emp, "sdl", 0.0) or 0.0)            # income
+    cpf_emp = float(getattr(emp, "cpf_employee", 0.0) or 0.0)   # deduction
+    shg     = float(getattr(emp, "shg", 0.0) or 0.0)            # deduction
+    adv     = float(getattr(emp, "advance", 0.0) or 0.0)        # deduction
 
-    # A4 portrait look: width ≈ 794px @96 dpi. Keep inside border so it prints as a full page.
+    total_income     = basic + comm + incent + allow + ot_amt + pt_amt + cpf_er + sdl
+    total_deductions = cpf_emp + shg + adv
+    total_net        = total_income - total_deductions
+    total_cpf        = cpf_er + cpf_emp
+
+    from calendar import month_name as _mn
+    ym   = f"{_mn[month_index_1]} {year}"
+    code = f"SV-{year}{month_index_1:02d}-{(getattr(emp, 'code', '') or 'EMP001')}"
+
+    def money(x: float) -> str:
+        try:
+            return f"{float(x):,.2f}"
+        except Exception:
+            return "0.00"
+
     return f"""<!doctype html>
 <html>
 <head>
 <meta charset="utf-8"/>
 <style>
-  :root {{
-    --sheet-w: 794px;          /* ~A4 width @96dpi */
-    --sheet-pad: 18px;         /* ~7mm */
-    --gap: 16px;
-    --border: #e5e7eb;
-    --muted: #6b7280;
-  }}
-  body {{ background:#fff; font-family:'Segoe UI', Arial, sans-serif; color:#111827; }}
-  .sheet {{
-    width: var(--sheet-w);
-    margin: 0 auto;
-    border: 1px solid var(--border);
-    box-sizing: border-box;
-    padding: var(--sheet-pad);
-  }}
+  /* Compact, gridless, print-safe */
+  html,body{{margin:0;padding:0;background:#fff;color:#0f172a;font-family:Arial,Helvetica,sans-serif;font-size:10.5pt}}
+  .page{{width:190mm;margin:0 auto;padding:12mm 10mm}}
 
-  .hdr {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }}
-  .brand {{ display:flex; gap:12px; align-items:center; }}
-  .cname {{ font-size:18px; font-weight:800; }}
-  .cline {{ font-size:12px; color:var(--muted); line-height:1.2; }}
-  .hrule {{ height:1px; background:var(--border); margin:10px 0 12px; }}
+  /* palette */
+  .muted{{color:#5b6776}}
+  .b0{{border:1px solid #d6d9df}}
+  .b1{{border-top:1px solid #e6e9ef}}
+  .cap{{background:#f6f8fb;border-bottom:1px solid #e6e9ef;font-weight:700;letter-spacing:.2px;padding:6px 8px}}
 
-  .title {{ font-size:26px; font-weight:800; color:#2563eb; margin:8px 0; }}
-  .rmeta {{ text-align:right; font-size:13px; color:#334155; }}
+  table{{border-collapse:collapse;width:100%}}
+  td,th{{padding:6px 8px;vertical-align:top}}
+  .kv td.lbl{{width:32%;color:#394555}}
+  .kv td.val{{width:68%;font-variant-numeric:tabular-nums}}
 
-  .panel {{ border:1px solid var(--border); border-radius:6px; padding:12px; }}
-  .kv {{ display:grid; grid-template-columns: 170px 1fr 150px 1fr; gap:8px 14px; }}
-  .kv .k {{ font-weight:700; color:#374151; }}
+  .tbl td.lbl{{width:65%;color:#394555;border-top:1px solid #eef1f4}}
+  .tbl td.val{{width:35%;text-align:right;font-variant-numeric:tabular-nums;border-top:1px solid #eef1f4}}
 
-  .cols {{ display:grid; grid-template-columns: 1fr 1fr; gap: var(--gap); margin-top:12px; }}
-  table {{ width:100%; border-collapse:collapse; font-size:13px; }}
-  th, td {{ padding:8px 10px; }}
-  .sec {{ border:1px solid var(--border); border-radius:6px; overflow:hidden; }}
-  .sec .cap {{ padding:10px; font-weight:700; background:#f8fafc; border-bottom:1px solid var(--border); }}
-  .sec tbody tr td {{ border-top:1px solid #f1f5f9; }}
-  .right {{ text-align:right; }}
+  .section-grid{{width:100%;border-collapse:separate;border-spacing:10px 0}}
+  .tight{{margin:6px 0}}
+  .title{{font-size:18pt;font-weight:800;color:#143d8c;margin:6px 0 8px}}
 
-  .notice {{ margin:12px 0; background:#fffbeb; border:1px solid #f59e0b; color:#92400e;
-            border-radius:6px; padding:8px 10px; font-size:13px; }}
-  .net {{ margin-top:10px; background:#e6f0ff; border:1px solid #bfdbfe; border-radius:6px;
-         padding:12px 14px; display:flex; justify-content:space-between; font-weight:800; }}
+  .totals .lbl{{width:70%}}
+  .totals .val{{width:30%;text-align:right;font-weight:700}}
 
-  .notes {{ margin-top:10px; font-size:12px; color:#475569; }}
-  .foot {{ display:flex; justify-content:space-between; align-items:flex-end; margin-top:28px; font-size:12px; color:#6b7280; }}
-  .sig {{ width:44%; text-align:center; }}
-  .sig hr {{ border:none; border-top:1px solid #cbd5e1; margin:28px 0 6px; }}
+  .bar{{background:#eaf0ff;border:1px solid #c8d6ff;border-radius:4px;padding:8px 10px;
+        display:flex;justify-content:space-between;font-weight:800}}
 </style>
 </head>
 <body>
-  <div class="sheet">
-    <div class="hdr">
-      <div class="brand">
-        {logo_html}
-        <div>
-          <div class="cname">{html.escape(company_name)}</div>
-          <div class="cline">{html.escape(detail1)}</div>
-          <div class="cline">{html.escape(detail2)}</div>
-        </div>
-      </div>
-      <div class="rmeta">
-        <div>{ym}</div>
-        <div>Code: <b>{code}</b></div>
-      </div>
-    </div>
+  <div class="page">
 
+    <!-- Header -->
+    <table>
+      <tr>
+        <td style="width:110px;vertical-align:top">{logo_html}</td>
+        <td style="vertical-align:top">
+          <div style="font-size:15pt;font-weight:800">{html.escape(company_name)}</div>
+          <div class="muted">{html.escape(detail1)}</div>
+          <div class="muted">{html.escape(detail2)}</div>
+        </td>
+        <td style="width:210px;vertical-align:top;text-align:right">
+          <div class="muted">{html.escape(ym)}</div>
+          <div style="color:#143d8c">Code: <b>{html.escape(code)}</b></div>
+        </td>
+      </tr>
+    </table>
+
+    <div class="b1 tight"></div>
     <div class="title">Salary Voucher</div>
-    <div class="hrule"></div>
 
-    <div class="panel">
-      <div class="kv">
-        <div class="k">Employee</div><div>{emp_name}</div>
-        <div class="k">Employee Code</div><div>{emp_code}</div>
-        <div class="k">Department</div><div>{dept}</div>
-        <div class="k">Position</div><div>{pos}</div>
-        <div class="k">Bank</div><div>{bank}</div>
-        <div class="k">Account No.</div><div>{acct}</div>
-      </div>
+    <!-- Employee panel -->
+    <div class="b0" style="border-radius:6px;overflow:hidden;margin-bottom:8px">
+      <div class="cap">Employee</div>
+      <table class="kv">
+        <tr><td class="lbl">Employee</td><td class="val">{html.escape(emp_name)}</td></tr>
+        <tr><td class="lbl">Employee Code</td><td class="val">{html.escape(emp_code)}</td></tr>
+        <tr><td class="lbl">Department</td><td class="val">{html.escape(dept)}</td></tr>
+        <tr><td class="lbl">Position</td><td class="val">{html.escape(pos)}</td></tr>
+        <tr><td class="lbl">Bank</td><td class="val">{html.escape(bank)}</td></tr>
+        <tr><td class="lbl">Account No.</td><td class="val">{html.escape(acct)}</td></tr>
+      </table>
     </div>
 
-    <div class="cols">
-      <div class="sec">
-        <div class="cap">Earnings</div>
-        <table>
-          <tbody>
-            <tr><td>Basic Salary</td><td class="right">{basic:.2f}</td></tr>
-            <tr><td>Commission</td><td class="right">{comm:.2f}</td></tr>
-            <tr><td>Incentives</td><td class="right">{incent:.2f}</td></tr>
-            <tr><td>Allowance</td><td class="right">{allow:.2f}</td></tr>
-            <tr><td>Overtime</td><td class="right">{ot_amt:.2f}</td></tr>
-            <tr><td>Part-time</td><td class="right">{pt_amt:.2f}</td></tr>
-            <tr><td><b>Gross Pay</b></td><td class="right"><b>{gross:.2f}</b></td></tr>
-          </tbody>
-        </table>
-      </div>
+    <!-- Earnings / Deductions -->
+    <table class="section-grid">
+      <tr>
+        <td style="width:50%;vertical-align:top">
+          <div class="b0" style="border-radius:6px;overflow:hidden">
+            <div class="cap">Earnings</div>
+            <table class="tbl">
+              <tr><td class="lbl">Basic Salary</td><td class="val">{money(basic)}</td></tr>
+              <tr><td class="lbl">Commission</td><td class="val">{money(comm)}</td></tr>
+              <tr><td class="lbl">Incentives</td><td class="val">{money(incent)}</td></tr>
+              <tr><td class="lbl">Allowance</td><td class="val">{money(allow)}</td></tr>
+              <tr><td class="lbl">Overtime</td><td class="val">{money(ot_amt)}</td></tr>
+              <tr><td class="lbl">Part-time</td><td class="val">{money(pt_amt)}</td></tr>
+              <tr><td class="lbl">Employer CPF Contribution</td><td class="val">{money(cpf_er)}</td></tr>
+              <tr><td class="lbl">SDL</td><td class="val">{money(sdl)}</td></tr>
+            </table>
+          </div>
+        </td>
+        <td style="width:50%;vertical-align:top">
+          <div class="b0" style="border-radius:6px;overflow:hidden">
+            <div class="cap">Deductions</div>
+            <table class="tbl">
+              <tr><td class="lbl">Employee CPF</td><td class="val">{money(cpf_emp)}</td></tr>
+              <tr><td class="lbl">SHG</td><td class="val">{money(shg)}</td></tr>
+              <tr><td class="lbl">Advance</td><td class="val">{money(adv)}</td></tr>
+            </table>
+          </div>
+        </td>
+      </tr>
+    </table>
 
-      <div class="sec">
-        <div class="cap">Deductions</div>
-        <table>
-          <tbody>
-            <tr><td>Employee CPF</td><td class="right">{emp_cpf:.2f}</td></tr>
-            <tr><td>SHG</td><td class="right">{shg:.2f}</td></tr>
-            <tr><td>SDL</td><td class="right">{sdl:.2f}</td></tr>
-            <tr><td>Levy</td><td class="right">{levy:.2f}</td></tr>
-            <tr><td><b>Total Deductions</b></td><td class="right"><b>{deductions:.2f}</b></td></tr>
-          </tbody>
-        </table>
-      </div>
+    <!-- Totals -->
+    <div class="b0" style="border-radius:6px;overflow:hidden;margin-top:8px">
+      <div class="cap">Totals</div>
+      <table class="totals" style="width:100%">
+        <tr><td class="lbl">Total Gross Salary</td><td class="val">{money(total_income)}</td></tr>
+        <tr><td class="lbl">Total Deductions</td><td class="val">{money(total_deductions)}</td></tr>
+        <tr><td class="lbl">Total CPF (ER + EE)</td><td class="val">{money(total_cpf)}</td></tr>
+      </table>
     </div>
 
-    <div class="notice">No Salary Review entry found for <b>{emp_name}</b> in <b>{ym}</b>.</div>
-
-    <div class="net"><div>Net Pay</div><div>{net_pay:.2f}</div></div>
-
-    <div class="notes">
-      Figures reflect the Salary Review for the selected period. If none exists, this preview shows zeros and a notice.
-      CPF and statutory values will be populated from tables once configured.
+    <!-- Net Pay -->
+    <div class="bar" style="margin-top:8px">
+      <div>Net Pay</div>
+      <div>{money(total_net)}</div>
     </div>
 
-    <div class="foot">
-      <div class="sig"><hr/>Prepared by: {html.escape(company_name)}</div>
-      <div class="sig"><hr/>Employee Acknowledgement</div>
-    </div>
+    <!-- Footer -->
+    <table style="width:100%;margin-top:12px">
+      <tr>
+        <td style="width:50%">
+          <div class="muted" style="font-weight:700">Prepared by</div>
+          <div>{html.escape(company_name)}</div>
+        </td>
+        <td style="width:50%;text-align:right" class="muted">
+          Employee Acknowledgement
+        </td>
+      </tr>
+    </table>
+
   </div>
 </body>
 </html>
@@ -361,10 +375,14 @@ class SalaryModuleWidget(QWidget):
 
         printer = QPrinter(QPrinter.HighResolution)
         printer.setOutputFormat(QPrinter.PdfFormat)
-        printer.setPageSize(QPrinter.A4)  # force A4
-        printer.setOutputFileName(path)
-        printer.setPageMargins(10, 10, 10, 10, QPrinter.Millimeter)  # ~10mm margins
+        # Qt6 page setup
+        printer.setPageSize(QPageSize(QPageSize.A4))
+        layout = printer.pageLayout()
+        layout.setOrientation(QPageLayout.Portrait)
+        layout.setMargins(QMarginsF(10, 12, 10, 12))  # mm
+        printer.setPageLayout(layout)
 
+        printer.setOutputFileName(path)
         doc.print_(printer)
 
     # -- Settings
