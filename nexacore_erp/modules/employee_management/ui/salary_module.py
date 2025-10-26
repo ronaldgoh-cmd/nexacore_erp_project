@@ -58,44 +58,52 @@ def _company() -> CompanySettings | None:
 
 def _voucher_html(cs: CompanySettings | None, emp: Employee | None, year: int, month_index_1: int) -> str:
     import html
-    # company
+    # --- company ---
     company_name = (cs.name if cs else "") or "Company Name"
     detail1 = (cs.detail1 if cs else "") or "Company details line 1"
     detail2 = (cs.detail2 if cs else "") or "Company details line 2"
     logo_html = _img_data_uri(getattr(cs, "logo", None), "Logo")
 
-    # employee snapshot
+    # --- employee snapshot ---
     emp_name = getattr(emp, "full_name", "") or "—"
     emp_code = getattr(emp, "code", "") or "—"
-    dept     = getattr(emp, "department", "") or "—"
-    pos      = getattr(emp, "position", "") or "—"
+    id_no    = getattr(emp, "identification_number", "") or getattr(emp, "nric", "") or "—"
     bank     = getattr(emp, "bank", "") or "—"
     acct     = getattr(emp, "bank_account", "") or "—"
 
-    # figures (placeholders until wired)
+    # --- figures (use your stored fields; labels show Rate * Hr as requested) ---
     basic   = float(getattr(emp, "basic_salary", 0.0) or 0.0)
     comm    = float(getattr(emp, "commission", 0.0) or 0.0)
     incent  = float(getattr(emp, "incentives", 0.0) or 0.0)
     allow   = float(getattr(emp, "allowance", 0.0) or 0.0)
 
-    ot_rate = float(getattr(emp, "overtime_rate", 0.0) or 0.0)
-    ot_hrs  = float(getattr(emp, "overtime_hours", 0.0) or 0.0); ot_amt = ot_rate * ot_hrs
     pt_rate = float(getattr(emp, "parttime_rate", 0.0) or 0.0)
-    pt_hrs  = float(getattr(emp, "part_time_hours", 0.0) or 0.0); pt_amt = pt_rate * pt_hrs
+    pt_hrs  = float(getattr(emp, "part_time_hours", 0.0) or 0.0)
+    pt_amt  = pt_rate * pt_hrs
 
-    cpf_er  = float(getattr(emp, "cpf_employer", 0.0) or 0.0)   # income
-    sdl     = float(getattr(emp, "sdl", 0.0) or 0.0)            # income
-    cpf_emp = float(getattr(emp, "cpf_employee", 0.0) or 0.0)   # deduction
-    shg     = float(getattr(emp, "shg", 0.0) or 0.0)            # deduction
-    adv     = float(getattr(emp, "advance", 0.0) or 0.0)        # deduction
+    ot_rate = float(getattr(emp, "overtime_rate", 0.0) or 0.0)
+    ot_hrs  = float(getattr(emp, "overtime_hours", 0.0) or 0.0)
+    ot_amt  = ot_rate * ot_hrs
 
-    total_income     = basic + comm + incent + allow + ot_amt + pt_amt + cpf_er + sdl
-    total_deductions = cpf_emp + shg + adv
-    total_net        = total_income - total_deductions
-    total_cpf        = cpf_er + cpf_emp
+    # deductions panel = Advanced + SHG only
+    advance = float(getattr(emp, "advance", 0.0) or 0.0)
+    shg     = float(getattr(emp, "shg", 0.0) or 0.0)
 
-    from calendar import month_name as _mn
-    ym   = f"{_mn[month_index_1]} {year}"
+    # CPF block
+    cpf_emp = float(getattr(emp, "cpf_employee", 0.0) or 0.0)
+    cpf_er  = float(getattr(emp, "cpf_employer", 0.0) or 0.0)
+    cpf_total = cpf_emp + cpf_er
+
+    # Others block
+    sdl  = float(getattr(emp, "sdl", 0.0) or 0.0)
+    levy = float(getattr(emp, "levy", 0.0) or 0.0)
+
+    gross = basic + comm + incent + allow + pt_amt + ot_amt
+    ded_only = advance + shg
+    # Net pay excludes employer CPF, SDL, Levy. Employee CPF reduces net.
+    net_pay = gross - ded_only - cpf_emp
+
+    ym = f"{month_name[month_index_1]} {year}"
     code = f"SV-{year}{month_index_1:02d}-{(getattr(emp, 'code', '') or 'EMP001')}"
 
     def money(x: float) -> str:
@@ -104,139 +112,178 @@ def _voucher_html(cs: CompanySettings | None, emp: Employee | None, year: int, m
         except Exception:
             return "0.00"
 
+    no_data = (gross == 0 and ded_only == 0 and cpf_emp == 0 and cpf_er == 0 and sdl == 0 and levy == 0)
+
     return f"""<!doctype html>
 <html>
 <head>
 <meta charset="utf-8"/>
+<title>Salary Voucher</title>
 <style>
-  /* Compact, gridless, print-safe */
-  html,body{{margin:0;padding:0;background:#fff;color:#0f172a;font-family:Arial,Helvetica,sans-serif;font-size:10.5pt}}
-  .page{{width:190mm;margin:0 auto;padding:12mm 10mm}}
-
-  /* palette */
-  .muted{{color:#5b6776}}
-  .b0{{border:1px solid #d6d9df}}
-  .b1{{border-top:1px solid #e6e9ef}}
-  .cap{{background:#f6f8fb;border-bottom:1px solid #e6e9ef;font-weight:700;letter-spacing:.2px;padding:6px 8px}}
-
-  table{{border-collapse:collapse;width:100%}}
-  td,th{{padding:6px 8px;vertical-align:top}}
-  .kv td.lbl{{width:32%;color:#394555}}
-  .kv td.val{{width:68%;font-variant-numeric:tabular-nums}}
-
-  .tbl td.lbl{{width:65%;color:#394555;border-top:1px solid #eef1f4}}
-  .tbl td.val{{width:35%;text-align:right;font-variant-numeric:tabular-nums;border-top:1px solid #eef1f4}}
-
-  .section-grid{{width:100%;border-collapse:separate;border-spacing:10px 0}}
-  .tight{{margin:6px 0}}
-  .title{{font-size:18pt;font-weight:800;color:#143d8c;margin:6px 0 8px}}
-
-  .totals .lbl{{width:70%}}
-  .totals .val{{width:30%;text-align:right;font-weight:700}}
-
-  .bar{{background:#eaf0ff;border:1px solid #c8d6ff;border-radius:4px;padding:8px 10px;
-        display:flex;justify-content:space-between;font-weight:800}}
+  body {{ margin:0; background:#ffffff; color:#111827; font-family:Segoe UI, Arial, sans-serif; }}
+  .page {{ width:794px; margin:0 auto; padding:36px 28px; }}
+  .muted {{ color:#6b7280; }}
+  .rule  {{ height:1px; background:#e5e7eb; }}
+  .panel {{ border:1px solid #e5e7eb; border-radius:6px; }}
+  .cap   {{ background:#f9fafb; border-bottom:1px solid #e5e7eb; font-weight:bold; padding:6px 8px; }}
+  .cell  {{ padding:6px 8px; }}
+  .title {{ color:#1f4e79; font-weight:bold; font-size:22px; padding:8px 0 6px 0; font-family:Helvetica, Arial, sans-serif; }}
+  .stripe{{ background:#e8f1fb; border:1px solid #cfe0f6; border-radius:4px; padding:10px 12px; }}
 </style>
 </head>
 <body>
   <div class="page">
 
-    <!-- Header -->
-    <table>
+    <!-- Header: company text aligned left beside logo -->
+    <table cellpadding="0" cellspacing="0" width="100%">
       <tr>
-        <td style="width:110px;vertical-align:top">{logo_html}</td>
-        <td style="vertical-align:top">
-          <div style="font-size:15pt;font-weight:800">{html.escape(company_name)}</div>
+        <td style="width:170px;vertical-align:top">{logo_html}</td>
+        <td style="vertical-align:top;text-align:left">
+          <div style="font-size:18px;font-weight:800">{html.escape(company_name)}</div>
           <div class="muted">{html.escape(detail1)}</div>
           <div class="muted">{html.escape(detail2)}</div>
         </td>
-        <td style="width:210px;vertical-align:top;text-align:right">
-          <div class="muted">{html.escape(ym)}</div>
-          <div style="color:#143d8c">Code: <b>{html.escape(code)}</b></div>
+        <td style="width:220px;vertical-align:top;text-align:right">
+          <div style="font-size:13px">{html.escape(ym)}</div>
+          <div style="font-size:12px;font-weight:bold">Code: {html.escape(code)}</div>
         </td>
       </tr>
     </table>
 
-    <div class="b1 tight"></div>
+    <div class="rule" style="margin:8px 0 12px 0"></div>
     <div class="title">Salary Voucher</div>
 
-    <!-- Employee panel -->
-    <div class="b0" style="border-radius:6px;overflow:hidden;margin-bottom:8px">
-      <div class="cap">Employee</div>
-      <table class="kv">
-        <tr><td class="lbl">Employee</td><td class="val">{html.escape(emp_name)}</td></tr>
-        <tr><td class="lbl">Employee Code</td><td class="val">{html.escape(emp_code)}</td></tr>
-        <tr><td class="lbl">Department</td><td class="val">{html.escape(dept)}</td></tr>
-        <tr><td class="lbl">Position</td><td class="val">{html.escape(pos)}</td></tr>
-        <tr><td class="lbl">Bank</td><td class="val">{html.escape(bank)}</td></tr>
-        <tr><td class="lbl">Account No.</td><td class="val">{html.escape(acct)}</td></tr>
-      </table>
-    </div>
-
-    <!-- Earnings / Deductions -->
-    <table class="section-grid">
+    <!-- Employee box: swap Employee Code above Employee, remove Position, change Department->Identification Number -->
+    <table cellpadding="0" cellspacing="0" width="100%" class="panel" style="margin:8px 0 10px 0">
+      <tr><td class="cap">Employee</td></tr>
       <tr>
-        <td style="width:50%;vertical-align:top">
-          <div class="b0" style="border-radius:6px;overflow:hidden">
-            <div class="cap">Earnings</div>
-            <table class="tbl">
-              <tr><td class="lbl">Basic Salary</td><td class="val">{money(basic)}</td></tr>
-              <tr><td class="lbl">Commission</td><td class="val">{money(comm)}</td></tr>
-              <tr><td class="lbl">Incentives</td><td class="val">{money(incent)}</td></tr>
-              <tr><td class="lbl">Allowance</td><td class="val">{money(allow)}</td></tr>
-              <tr><td class="lbl">Overtime</td><td class="val">{money(ot_amt)}</td></tr>
-              <tr><td class="lbl">Part-time</td><td class="val">{money(pt_amt)}</td></tr>
-              <tr><td class="lbl">Employer CPF Contribution</td><td class="val">{money(cpf_er)}</td></tr>
-              <tr><td class="lbl">SDL</td><td class="val">{money(sdl)}</td></tr>
-            </table>
-          </div>
-        </td>
-        <td style="width:50%;vertical-align:top">
-          <div class="b0" style="border-radius:6px;overflow:hidden">
-            <div class="cap">Deductions</div>
-            <table class="tbl">
-              <tr><td class="lbl">Employee CPF</td><td class="val">{money(cpf_emp)}</td></tr>
-              <tr><td class="lbl">SHG</td><td class="val">{money(shg)}</td></tr>
-              <tr><td class="lbl">Advance</td><td class="val">{money(adv)}</td></tr>
-            </table>
-          </div>
+        <td class="cell">
+          <table cellpadding="0" cellspacing="0" width="100%">
+            <tr>
+              <td style="width:50%;vertical-align:top">
+                <table cellpadding="0" cellspacing="0" width="100%">
+                  <tr><td class="cell" style="width:160px;color:#374151;font-weight:bold">Employee Code</td><td class="cell">{html.escape(emp_code)}</td></tr>
+                  <tr><td class="cell" style="color:#374151;font-weight:bold">Employee</td><td class="cell">{html.escape(emp_name)}</td></tr>
+                  <tr><td class="cell" style="color:#374151;font-weight:bold">Identification Number</td><td class="cell">{html.escape(id_no)}</td></tr>
+                </table>
+              </td>
+              <td style="width:50%;vertical-align:top">
+                <table cellpadding="0" cellspacing="0" width="100%">
+                  <tr><td class="cell" style="width:160px;color:#374151;font-weight:bold">Bank</td><td class="cell">{html.escape(bank)}</td></tr>
+                  <tr><td class="cell" style="color:#374151;font-weight:bold">Account No.</td><td class="cell">{html.escape(acct)}</td></tr>
+                </table>
+              </td>
+            </tr>
+          </table>
         </td>
       </tr>
     </table>
 
-    <!-- Totals -->
-    <div class="b0" style="border-radius:6px;overflow:hidden;margin-top:8px">
-      <div class="cap">Totals</div>
-      <table class="totals" style="width:100%">
-        <tr><td class="lbl">Total Gross Salary</td><td class="val">{money(total_income)}</td></tr>
-        <tr><td class="lbl">Total Deductions</td><td class="val">{money(total_deductions)}</td></tr>
-        <tr><td class="lbl">Total CPF (ER + EE)</td><td class="val">{money(total_cpf)}</td></tr>
-      </table>
-    </div>
-
-    <!-- Net Pay -->
-    <div class="bar" style="margin-top:8px">
-      <div>Net Pay</div>
-      <div>{money(total_net)}</div>
-    </div>
-
-    <!-- Footer -->
-    <table style="width:100%;margin-top:12px">
+    <!-- Earnings / Deductions -->
+    <table cellpadding="0" cellspacing="0" width="100%">
       <tr>
-        <td style="width:50%">
-          <div class="muted" style="font-weight:700">Prepared by</div>
-          <div>{html.escape(company_name)}</div>
+        <!-- Earnings -->
+        <td style="width:50%;vertical-align:top">
+          <table cellpadding="0" cellspacing="0" width="100%" class="panel">
+            <tr><td class="cap">Earnings</td></tr>
+            <tr><td>
+              <table cellpadding="0" cellspacing="0" width="100%">
+                <tr><td class="cell" style="color:#374151">Basic Salary</td><td class="cell" style="text-align:right">{money(basic)}</td></tr>
+                <tr><td class="cell" style="color:#374151">Commission</td><td class="cell" style="text-align:right">{money(comm)}</td></tr>
+                <tr><td class="cell" style="color:#374151">Incentives</td><td class="cell" style="text-align:right">{money(incent)}</td></tr>
+                <tr><td class="cell" style="color:#374151">Allowance</td><td class="cell" style="text-align:right">{money(allow)}</td></tr>
+                <tr><td class="cell" style="color:#374151">Part time (Rate × Hr)</td><td class="cell" style="text-align:right">{money(pt_amt)}</td></tr>
+                <tr><td class="cell" style="color:#374151">Overtime (Rate × Hr)</td><td class="cell" style="text-align:right">{money(ot_amt)}</td></tr>
+                <tr><td class="cell" style="font-weight:bold">Gross Pay</td><td class="cell" style="text-align:right;font-weight:bold">{money(gross)}</td></tr>
+              </table>
+            </td></tr>
+          </table>
         </td>
-        <td style="width:50%;text-align:right" class="muted">
-          Employee Acknowledgement
+
+        <td style="width:12px"></td>
+
+        <!-- Deductions -->
+        <td style="width:50%;vertical-align:top">
+          <table cellpadding="0" cellspacing="0" width="100%" class="panel">
+            <tr><td class="cap">Deductions</td></tr>
+            <tr><td>
+              <table cellpadding="0" cellspacing="0" width="100%">
+                <tr><td class="cell" style="color:#374151">Advanced</td><td class="cell" style="text-align:right">{money(advance)}</td></tr>
+                <tr><td class="cell" style="color:#374151">SHG</td><td class="cell" style="text-align:right">{money(shg)}</td></tr>
+                <tr><td class="cell" style="font-weight:bold">Total Deductions</td><td class="cell" style="text-align:right;font-weight:bold">{money(ded_only)}</td></tr>
+              </table>
+            </td></tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+
+    <!-- CPF block -->
+    <table cellpadding="0" cellspacing="0" width="100%" class="panel" style="margin-top:10px">
+      <tr><td class="cap">CPF</td></tr>
+      <tr><td>
+        <table cellpadding="0" cellspacing="0" width="100%">
+          <tr><td class="cell" style="color:#374151">Employee</td><td class="cell" style="text-align:right">{money(cpf_emp)}</td></tr>
+          <tr><td class="cell" style="color:#374151">Employer</td><td class="cell" style="text-align:right">{money(cpf_er)}</td></tr>
+          <tr><td class="cell" style="font-weight:bold">Total</td><td class="cell" style="text-align:right;font-weight:bold">{money(cpf_total)}</td></tr>
+        </table>
+      </td></tr>
+    </table>
+
+    <!-- Others block -->
+    <table cellpadding="0" cellspacing="0" width="100%" class="panel" style="margin-top:10px">
+      <tr><td class="cap">Others</td></tr>
+      <tr><td>
+        <table cellpadding="0" cellspacing="0" width="100%">
+          <tr><td class="cell" style="color:#374151">SDL</td><td class="cell" style="text-align:right">{money(sdl)}</td></tr>
+          <tr><td class="cell" style="color:#374151">Levy</td><td class="cell" style="text-align:right">{money(levy)}</td></tr>
+        </table>
+      </td></tr>
+    </table>
+
+    {'' if not no_data else f'''
+    <table cellpadding="0" cellspacing="0" width="100%" style="margin-top:10px">
+      <tr><td>
+        <table cellpadding="0" cellspacing="0" width="100%" style="border:1px solid #fdba74;background:#fff7ed;border-radius:4px">
+          <tr><td style="padding:8px 10px;color:#9a3412;font-weight:bold">
+            No Salary Review entry found for {html.escape(emp_name if emp_name != "—" else "selected employee")} in {html.escape(ym)}.
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+    '''}
+
+    <!-- Net Pay stripe -->
+    <table cellpadding="0" cellspacing="0" width="100%" style="margin-top:12px">
+      <tr>
+        <td class="stripe" style="font-weight:bold">Net Pay</td>
+        <td class="stripe" style="text-align:right;font-weight:bold">{money(net_pay)}</td>
+      </tr>
+    </table>
+
+    <!-- Notes -->
+    <div style="margin-top:12px;font-weight:bold">Notes</div>
+    <div class="muted" style="font-size:13px">
+      Figures reflect the 'Salary Review' records for the selected period. If no record exists, this preview
+      shows zeros and a not-found notice. CPF and statutory amounts shown are those stored in the review.
+    </div>
+
+    <!-- Signatures -->
+    <table cellpadding="0" cellspacing="0" width="100%" style="margin-top:22px">
+      <tr>
+        <td style="width:50%;vertical-align:bottom">
+          <div style="font-weight:bold">Prepared by: {html.escape(company_name)}</div>
+        </td>
+        <td style="width:50%;text-align:right;vertical-align:bottom">
+          <div>Employee Acknowledgement</div>
+          <div style="height:1px;background:#e5e7eb;margin-top:18px"></div>
         </td>
       </tr>
     </table>
 
   </div>
 </body>
-</html>
-"""
+</html>"""
 
 
 # ---------- widget ----------
