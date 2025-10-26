@@ -265,10 +265,13 @@ class MainWindow(QMainWindow):
             title = f"{mname} — {sub}"
             for info, module in discover_modules():
                 if info["name"] == mname:
+                    from PySide6.QtWidgets import QMessageBox
                     try:
                         w = module.get_submodule_widget(sub)
-                    except Exception:
-                        w = module.get_widget()
+                    except Exception as ex:
+                        # show the real error instead of falling back
+                        QMessageBox.critical(self, "Failed to open submodule", f"{sub} error:\n{ex}")
+                        raise  # let the traceback appear in console
                     self._open_in_tab(title, w)
                     break
 
