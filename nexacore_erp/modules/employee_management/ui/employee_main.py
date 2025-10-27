@@ -9,8 +9,53 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QComboBox, QFormLayout, QDateEdit, QFileDialog,
     QDialog, QDialogButtonBox, QMessageBox, QSpinBox, QCheckBox, QGroupBox, QGridLayout,
     QScrollArea, QListWidgetItem, QHeaderView, QAbstractItemView, QSizePolicy, QListWidget,
-    QInputDialog, QApplication
+    QInputDialog, QApplication, QDateTimeEdit
 )
+from PySide6.QtWidgets import QDateEdit, QDateTimeEdit
+from PySide6.QtCore import QDate, QDateTime
+
+class BlankableDateEdit(QDateEdit):
+    """Truly blank until a real date is set."""
+    def __init__(self, display_fmt: str = "yyyy-MM-dd", *a, **kw):
+        # set flags before base __init__ because Qt may call textFromDateTime during init
+        self._fmt = display_fmt
+        self._blank = True
+        super().__init__(*a, **kw)
+
+        self.setCalendarPopup(True)
+        self.setMinimumDate(QDate(1900, 1, 1))
+        self.setSpecialValueText(" ")  # single space renders visually empty
+        super().setDate(self.minimumDate())
+        self.setDisplayFormat(self._fmt)
+        self.dateChanged.connect(self._unblank_on_change)
+
+    # Qt calls this while painting; keep empty when blank
+    def textFromDateTime(self, dt: QDateTime):  # type: ignore[override]
+        if getattr(self, "_blank", True):
+            return ""
+        return QDateTimeEdit.textFromDateTime(self, dt)
+
+    def _unblank_on_change(self, _):
+        if self._blank:
+            self._blank = False
+            self.update()
+
+    def clear(self):
+        self._blank = True
+        super().setDate(self.minimumDate())
+        self.update()
+
+    def set_real_date(self, qdate: QDate | None):
+        if qdate and qdate.isValid():
+            self._blank = False
+            super().setDate(qdate)
+        else:
+            self.clear()
+        self.update()
+
+    def date_or_none(self):
+        return None if self._blank else self.date()
+
 
 # optional XLSX support
 try:
@@ -31,13 +76,26 @@ from ..models import (
 )
 
 # block wheel changes on all combo boxes
+# block wheel changes on all combo boxes
 class _NoWheelFilter(QObject):
     def eventFilter(self, obj, ev):
-        if isinstance(obj, QComboBox) and ev.type() == QEvent.Wheel:
-            return True
+        if isinstance(obj, QComboBox):
+            # ignore mouse wheel when popup is closed
+            if ev.type() == QEvent.Wheel and not obj.view().isVisible():
+                return True
+            # optional: block PgUp/PgDn from changing selection when closed
+            if ev.type() == QEvent.KeyPress and not obj.view().isVisible():
+                if ev.key() in (Qt.Key_PageUp, Qt.Key_PageDown):
+                    return True
         return False
 
 _NO_WHEEL_FILTER = _NoWheelFilter()
+
+# in __init__ (you already have this)
+app = QApplication.instance()
+if app is not None:
+    app.installEventFilter(_NO_WHEEL_FILTER)
+
 
 # ---------------- Employee code settings (session-scope) ----------------
 EMP_CODE_PREFIX = "EM-"
@@ -120,7 +178,6 @@ class EmployeeMainWidget(QWidget):
 
         # actions row
         actions = QHBoxLayout()
-        # filters toggle (start minimized)
         self.filter_toggle = QPushButton("Filters ▸")
         self.filter_toggle.setCheckable(True)
         self.filter_toggle.setChecked(False)
@@ -130,11 +187,11 @@ class EmployeeMainWidget(QWidget):
         self.quick_search = QLineEdit()
         self.quick_search.setPlaceholderText("Quick search (any column)…")
         self.quick_search.textChanged.connect(self._apply_filters)
-        btn_add = QPushButton("Add")
+        btn_add = QPushButton("Add");
         btn_add.clicked.connect(self._add_employee)
-        btn_edit = QPushButton("Edit")
+        btn_edit = QPushButton("Edit");
         btn_edit.clicked.connect(self._edit_employee)
-        btn_del = QPushButton("Delete")
+        btn_del = QPushButton("Delete");
         btn_del.clicked.connect(self._delete_employee)
         for w in (self.quick_search, btn_add, btn_edit, btn_del):
             actions.addWidget(w)
@@ -158,28 +215,39 @@ class EmployeeMainWidget(QWidget):
 
         r = 0
         add_filter(r, "Status", "employment_status",
-                   lambda: self._combo_with(["", "Active", "Non-Active"])); r += 1
-        add_filter(r, "Employee Code", "code", QLineEdit); r += 1
-        add_filter(r, "Employee Name", "full_name", QLineEdit); r += 1
-        add_filter(r, "Department", "department", QLineEdit); r += 1
-        add_filter(r, "Position", "position", QLineEdit); r += 1
+                   lambda: self._combo_with(["", "Active", "Non-Active"]));
+        r += 1
+        add_filter(r, "Employee Code", "code", QLineEdit);
+        r += 1
+        add_filter(r, "Employee Name", "full_name", QLineEdit);
+        r += 1
+        add_filter(r, "Department", "department", QLineEdit);
+        r += 1
+        add_filter(r, "Position", "position", QLineEdit);
+        r += 1
         add_filter(r, "Employment Type", "employment_type",
-                   lambda: self._combo_with(["", "Full-Time", "Part-Time", "Contract"])); r += 1
-        add_filter(r, "ID Type", "id_type", QLineEdit); r += 1
-        add_filter(r, "ID Number", "id_number", QLineEdit); r += 1
-        add_filter(r, "Country", "country", QLineEdit); r += 1
+                   lambda: self._combo_with(["", "Full-Time", "Part-Time", "Contract"]));
+        r += 1
+        add_filter(r, "ID Type", "id_type", QLineEdit);
+        r += 1
+        add_filter(r, "ID Number", "id_number", QLineEdit);
+        r += 1
+        add_filter(r, "Country", "country", QLineEdit);
+        r += 1
         add_filter(r, "Residency", "residency",
-                   lambda: self._combo_with(["", "Citizen", "Permanent Resident", "Work Pass"])); r += 1
-        add_filter(r, "Age ≥", "age_min", QLineEdit); r += 1
-        add_filter(r, "Age ≤", "age_max", QLineEdit); r += 1
+                   lambda: self._combo_with(["", "Citizen", "Permanent Resident", "Work Pass"]));
+        r += 1
+        add_filter(r, "Age ≥", "age_min", QLineEdit);
+        r += 1
+        add_filter(r, "Age ≤", "age_max", QLineEdit);
+        r += 1
         fbv.addLayout(grid)
 
-        # make filters scrollable to keep compact
         self.filter_area = QScrollArea()
         self.filter_area.setWidget(self.filter_box)
         self.filter_area.setWidgetResizable(True)
         self.filter_area.setFixedHeight(160)
-        self.filter_area.setVisible(False)  # start minimized
+        self.filter_area.setVisible(False)
         lv.addWidget(self.filter_area)
 
         # table
@@ -187,14 +255,16 @@ class EmployeeMainWidget(QWidget):
         self.emp_table.setHorizontalHeaderLabels([c[1] for c in COLS])
         self.emp_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.emp_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.emp_table.setSortingEnabled(True)
+        self.emp_table.setSortingEnabled(False)  # keep stable order
         self.emp_table.itemSelectionChanged.connect(self._show_preview)
         hdr = self.emp_table.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.ResizeToContents)  # auto-fit to header/contents
+        hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
         hdr.setStretchLastSection(False)
+        hdr.setSortIndicatorShown(False)  # hide sort arrow
+        hdr.setSectionsClickable(False)  # disable click-to-sort
         lv.addWidget(self.emp_table, 1)
 
-        # right: read-only detail form
+        # right: detail
         right = QWidget(splitter)
         rv = QVBoxLayout(right)
         self.detail_form = self._build_readonly_form()
@@ -247,7 +317,6 @@ class EmployeeMainWidget(QWidget):
         def keep(e: Employee) -> bool:
             if not ((e.code or "").strip() or (e.full_name or "").strip()):
                 return False
-
             if txt:
                 hay = " ".join([
                     str(e.employment_status or ""), str(e.code or ""), str(e.full_name or ""),
@@ -257,13 +326,11 @@ class EmployeeMainWidget(QWidget):
                 ]).lower()
                 if txt not in hay:
                     return False
-
             for key in ["employment_status", "code", "full_name", "department", "position",
                         "employment_type", "id_type", "id_number", "country", "residency"]:
                 val = f_get(key)
                 if val and val not in str(getattr(e, key, "") or "").lower():
                     return False
-
             age = None
             if e.dob:
                 try:
@@ -278,7 +345,7 @@ class EmployeeMainWidget(QWidget):
 
         rows = [e for e in getattr(self, "_all_rows", []) if keep(e)]
 
-        self.emp_table.setSortingEnabled(False)
+        self.emp_table.setSortingEnabled(False)  # hard-disable resort
         self.emp_table.setRowCount(len(rows))
         for r, e in enumerate(rows):
             def put(col, val):
@@ -311,8 +378,7 @@ class EmployeeMainWidget(QWidget):
 
             self.emp_table.setVerticalHeaderItem(r, QTableWidgetItem(str(e.id)))
 
-        self.emp_table.setSortingEnabled(True)
-
+        # do not re-enable sorting
         if self.emp_table.rowCount() > 0:
             self.emp_table.selectRow(0)
         else:
@@ -561,7 +627,7 @@ class EmployeeMainWidget(QWidget):
     # ---------------- Settings ----------------
     def _build_settings_tab(self):
         host = QWidget()
-        host.setMaximumWidth(520)  # slimmer panel
+        host.setMaximumWidth(520)
         v = QVBoxLayout(host)
 
         # Employee ID format
@@ -596,14 +662,14 @@ class EmployeeMainWidget(QWidget):
 
         v.addSpacing(8)
 
-        # Data Management: export/import XLSX with dropdowns
+        # Data Management
         row2 = QHBoxLayout()
         exp_btn = QPushButton("Export XLSX")
         exp_btn.clicked.connect(self._export_xlsx)
         imp_btn = QPushButton("Import XLSX")
         imp_btn.clicked.connect(self._import_xlsx)
         tmpl_btn = QPushButton("Download Template")
-        tmpl_btn.clicked.connect(self._export_employees_template)  # template with dropdowns
+        tmpl_btn.clicked.connect(self._export_employees_template)
         row2.addWidget(exp_btn)
         row2.addWidget(imp_btn)
         row2.addWidget(tmpl_btn)
@@ -631,7 +697,6 @@ class EmployeeMainWidget(QWidget):
             for r in s.query(DropdownOption).all():
                 drop.setdefault(r.category, []).append(r.value)
             emps = s.query(Employee).filter(Employee.account_id == tenant_id()).all()
-            # add Holiday Group and Employment Status fixed lists
             groups = [g[0] for g in s.query(Holiday.group_code).distinct().all()]
         drop.setdefault("Holiday Group", groups)
         drop.setdefault("Employment Status", ["Active", "Non-Active"])
@@ -641,7 +706,7 @@ class EmployeeMainWidget(QWidget):
         ws.title = "Employees"
         ws2 = wb.create_sheet("Dropdowns")
 
-        # write dropdowns in rows (category in col A, values from col B rightwards)
+        # write dropdowns
         drow = 1
         for cat, vals in sorted(drop.items()):
             ws2.cell(drow, 1, cat)
@@ -674,7 +739,6 @@ class EmployeeMainWidget(QWidget):
                 e.basic_salary or 0.0
             ])
 
-        # data validations
         col_index = {h: i + 1 for i, h in enumerate(headers)}
         dv_map = {
             "ID Type": "ID Type", "Gender": "Gender", "Race": "Race", "Country": "Country",
@@ -687,7 +751,6 @@ class EmployeeMainWidget(QWidget):
         for r in range(1, ws2.max_row + 1):
             cat = ws2.cell(r, 1).value
             if not cat: continue
-            # dynamic width to the right based on COUNTA
             cat_formula[cat] = f'=OFFSET(Dropdowns!$B${r},0,0,1,COUNTA(Dropdowns!$B${r}:$ZZ${r}))'
 
         max_rows = max(1000, ws.max_row + 100)
@@ -723,7 +786,6 @@ class EmployeeMainWidget(QWidget):
             QMessageBox.warning(self, "Import", f"Cannot open workbook: {ex}")
             return
 
-        # case-insensitive header map
         headers = {}
         for c in range(1, ws.max_column + 1):
             h = ws.cell(1, c).value
@@ -755,7 +817,6 @@ class EmployeeMainWidget(QWidget):
 
         created = updated = 0
         with SessionLocal() as s:
-            # ----- allocate a monotonic "next code" cursor for this import run -----
             prefix, z = EMP_CODE_PREFIX, EMP_CODE_ZPAD
             existing_codes = [
                 c for (c,) in s.query(Employee.code)
@@ -861,7 +922,6 @@ class EmployeeMainWidget(QWidget):
         QMessageBox.information(self, "Import", f"Import complete. Created {created}, Updated {updated}.")
 
     def _export_employees_template(self):
-        # blank template with dropdown validations derived from DropdownOption
         if Workbook is None or DataValidation is None or get_column_letter is None:
             QMessageBox.warning(self, "Template", "openpyxl is required. Install 'openpyxl'.")
             return
@@ -885,9 +945,8 @@ class EmployeeMainWidget(QWidget):
             "Bank", "Account Number",
             "Incentives", "Allowance", "Overtime Rate", "Part Time Rate", "Levy", "Basic Salary"
         ]
-        ws.append(headers)  # only header row
+        ws.append(headers)
 
-        # build dropdown sources
         with SessionLocal() as s:
             dropdowns = {c: [r.value for r in s.query(DropdownOption)
                              .filter(DropdownOption.category == c)
@@ -897,7 +956,6 @@ class EmployeeMainWidget(QWidget):
         dropdowns["Employment Status"] = ["Active", "Non-Active"]
         dropdowns["Holiday Group"] = groups
 
-        # write lists on sheet "Dropdowns" in columns
         lists = wb.create_sheet("Dropdowns")
         list_col_map = {}
         col_idx = 1
@@ -908,15 +966,14 @@ class EmployeeMainWidget(QWidget):
                 lists.cell(row=i, column=col_idx, value=v)
             col_idx += 1
 
-        # map header names to column letters
-        header_to_letter = {h: get_column_letter(i+1) for i, h in enumerate(headers)}
+        from openpyxl.utils import get_column_letter as _gcl
+        header_to_letter = {h: _gcl(i+1) for i, h in enumerate(headers)}
 
-        # add validations
         def add_validation(header_name: str, category: str):
             if category not in list_col_map:
                 return
             col = list_col_map[category]
-            rng = f"Dropdowns!${get_column_letter(col)}$2:${get_column_letter(col)}$2000"
+            rng = f"Dropdowns!${_gcl(col)}$2:${_gcl(col)}$2000"
             dv = DataValidation(type="list", formula1=rng, allow_blank=True)
             ws.add_data_validation(dv)
             col_letter = header_to_letter[header_name]
@@ -952,7 +1009,6 @@ class EmployeeMainWidget(QWidget):
         z = int(self.zero_pad.value())
         self.id_preview.setText(f"Preview: {p}{1:0{z}d}")
 
-        # Reformat existing employee codes for this tenant
         def extract_num(code: str):
             if not code: return None
             m = re.search(r"(\d+)$", code)
@@ -973,11 +1029,9 @@ class EmployeeMainWidget(QWidget):
                 e.code = f"{p}{n:0{z}d}"
             s.commit()
 
-        # update globals and persist
         EMP_CODE_PREFIX, EMP_CODE_ZPAD = p, z
         _save_code_settings(p, z)
 
-        # refresh list immediately
         try:
             self._reload_employees()
         except Exception:
@@ -1020,8 +1074,9 @@ class EmployeeEditor(QDialog):
         self.setWindowTitle("Employee")
         self._emp_id = emp_id
 
-        v = QVBoxLayout(self)
-        self.tabs = QTabWidget(self); v.addWidget(self.tabs)
+        lay = QVBoxLayout(self)
+        self.tabs = QTabWidget(self)
+        lay.addWidget(self.tabs)
 
         self._build_personal_tab()
         self._build_employment_tab()
@@ -1030,17 +1085,66 @@ class EmployeeEditor(QDialog):
         self._build_schedule_tab()
         self._build_entitlement_tab()
 
-        bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self._save); bb.rejected.connect(self.reject)
-        v.addWidget(bb)
+        bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, parent=self)
+        bb.accepted.connect(self._save)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
 
-        # widen editor window
-        self.resize(1200, 720)
+        self.resize(1200, 760)
 
-        if emp_id:
-            self._load(emp_id)
+        if self._emp_id:
+            self._load(self._emp_id)
+        else:
+            # Add mode: force all date edits to blank and auto-load default leave
+            for w in (self.dob, self.pr_date, self.join_date, self.exit_date):
+                w.clear()
+            self._set_all_fields_blank()
+            self._load_defaults_into_entitlements()
 
     # --- helpers ---
+    def _set_all_fields_blank(self):
+        from PySide6.QtWidgets import QLineEdit, QComboBox, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox
+
+        def _blank_combo(cb: QComboBox):
+            if not cb:
+                return
+            if cb.count() == 0 or cb.itemText(0) not in ("", "-"):
+                cb.insertItem(0, "")
+            cb.setCurrentIndex(0)
+
+        for name in (
+                "full_name", "email", "contact", "address", "id_number",
+                "work_permit_number", "bank_account", "bank_name",
+                "basic_salary", "commission", "incentives", "allowance",
+                "overtime_rate", "part_time_rate", "levy"
+        ):
+            w = getattr(self, name, None)
+            if isinstance(w, QLineEdit):
+                w.clear()
+            elif isinstance(w, (QPlainTextEdit, QTextEdit)):
+                w.clear()
+            elif isinstance(w, (QSpinBox, QDoubleSpinBox)):
+                try:
+                    if hasattr(w, "setSpecialValueText"):
+                        w.setSpecialValueText("")
+                        w.setValue(w.minimum())
+                    else:
+                        w.setValue(0)
+                except Exception:
+                    w.setValue(0)
+
+        for name in (
+                "id_type", "gender", "race", "country", "residency",
+                "employment_status", "employment_pass", "department",
+                "position", "employment_type", "holiday_group", "bank"  # <- fixed
+        ):
+            w = getattr(self, name, None)
+            if isinstance(w, QComboBox):
+                _blank_combo(w)
+
+        if hasattr(self, "age_lbl"):
+            self.age_lbl.setText("-")
+
     def _opts(self, category: str) -> list[str]:
         with SessionLocal() as s:
             rows = s.query(DropdownOption).filter(DropdownOption.category == category).order_by(DropdownOption.value).all()
@@ -1061,13 +1165,19 @@ class EmployeeEditor(QDialog):
         self.id_type = QComboBox(); self.id_type.addItems(self._opts("ID Type"))
         self.id_number = QLineEdit()
         self.gender = QComboBox(); self.gender.addItems(self._opts("Gender") or ["Male", "Female"])
-        self.dob = QDateEdit(); self.dob.setCalendarPopup(True); self.dob.setDate(QDate.currentDate()); self.dob.dateChanged.connect(self._update_age)
+
+        # use blankable dates
+        self.dob = BlankableDateEdit()
+        self.dob.dateChanged.connect(self._update_age)
+
         self.age_lbl = QLabel("-")
         self.race = QComboBox(); self.race.addItems(self._opts("Race"))
         self.country = QComboBox(); self.country.addItems(self._opts("Country"))
         self.residency = QComboBox(); self.residency.addItems(self._opts("Residency") or ["Citizen", "Permanent Resident", "Work Pass"])
         self.residency.currentTextChanged.connect(self._toggle_pr_date)
-        self.pr_date = QDateEdit(); self.pr_date.setCalendarPopup(True); self.pr_date.setEnabled(False)
+
+        self.pr_date = BlankableDateEdit()
+        self.pr_date.setEnabled(False)
 
         f.addRow("Full Name", self.full_name)
         f.addRow("Email", self.email)
@@ -1087,7 +1197,11 @@ class EmployeeEditor(QDialog):
 
     def _update_age(self):
         try:
-            dob = self.dob.date().toPython()
+            d = self.dob.date_or_none()
+            if not d:
+                self.age_lbl.setText("-")
+                return
+            dob = d.toPython()
             yrs = int((date.today() - dob).days // 365.25)
             self.age_lbl.setText(str(yrs))
         except Exception:
@@ -1100,10 +1214,7 @@ class EmployeeEditor(QDialog):
     def _sync_status_from_exit(self):
         qd = self.exit_date
         today = QDate.currentDate()
-        is_blank = (
-                (qd.specialValueText() and qd.date() == qd.minimumDate())
-                or (qd.text().strip() == "")
-        )
+        is_blank = (qd.date_or_none() is None) if isinstance(qd, BlankableDateEdit) else False
         if is_blank:
             self.employment_status.setCurrentText("Active")
         else:
@@ -1112,40 +1223,32 @@ class EmployeeEditor(QDialog):
             elif qd.date() < today:
                 self.employment_status.setCurrentText("Non-Active")
             else:
-                self.employment_status.setCurrentText("Active")  # exit date == today
+                self.employment_status.setCurrentText("Active")
 
     # --- Employment ---
     def _build_employment_tab(self):
-        w = QWidget();
+        w = QWidget()
         f = QFormLayout(w)
-        self.employment_status = QComboBox();
+        self.employment_status = QComboBox()
         self.employment_status.addItems(["Active", "Non-Active"])
-        self.employment_pass = QComboBox();
+        self.employment_pass = QComboBox()
         self.employment_pass.addItems(self._opts("Employment Pass") or ["None", "S Pass", "Work Permit"])
         self.employment_pass.currentTextChanged.connect(self._toggle_wp)
-        self.work_permit_number = QLineEdit();
+        self.work_permit_number = QLineEdit()
         self.work_permit_number.setEnabled(False)
-        self.department = QComboBox();
+        self.department = QComboBox()
         self.department.addItems(self._opts("Department"))
-        self.position = QComboBox();
+        self.position = QComboBox()
         self.position.addItems(self._opts("Position"))
-        self.employment_type = QComboBox();
+        self.employment_type = QComboBox()
         self.employment_type.addItems(self._opts("Employment Type") or ["Full-Time", "Part-Time", "Contract"])
 
-        self.join_date = QDateEdit();
-        self.join_date.setCalendarPopup(True);
-        self.join_date.setDisplayFormat("yyyy-MM-dd")
-
-        self.exit_date = QDateEdit()
-        self.exit_date.setCalendarPopup(True)
-        self.exit_date.setDisplayFormat("yyyy-MM-dd")
-        self.exit_date.setSpecialValueText("")  # true blank
-        self.exit_date.setMinimumDate(QDate(1900, 1, 1))
-        self.exit_date.setDate(self.exit_date.minimumDate())  # start blank
+        # blankable join and exit dates
+        self.join_date = BlankableDateEdit()
+        self.exit_date = BlankableDateEdit()
         self.exit_date.dateChanged.connect(lambda _d: self._sync_status_from_exit())
-        self.exit_date.editingFinished.connect(self._sync_status_from_exit)
 
-        self.holiday_group = QComboBox();
+        self.holiday_group = QComboBox()
         self.holiday_group.addItems(self._holiday_groups())
 
         f.addRow("Employment Status", self.employment_status)
@@ -1175,7 +1278,6 @@ class EmployeeEditor(QDialog):
     def _build_remuneration_tab(self):
         w = QWidget(); v = QVBoxLayout(w)
 
-        # quick fields
         grid = QGridLayout()
         self.incentives = QLineEdit("0")
         self.allowance = QLineEdit("0")
@@ -1191,7 +1293,6 @@ class EmployeeEditor(QDialog):
         grid.addWidget(QLabel("Levy"), 5, 0); grid.addWidget(self.levy, 5, 1)
         v.addLayout(grid)
 
-        # salary history table
         self.salary_tbl = QTableWidget(0, 3)
         self.salary_tbl.setHorizontalHeaderLabels(["Amount", "Start Date", "End Date"])
         self.salary_tbl.horizontalHeader().setStretchLastSection(True)
@@ -1228,7 +1329,6 @@ class EmployeeEditor(QDialog):
         top = QHBoxLayout()
         self.ent_leave_types = self._load_leave_types()
         self.ent_tbl = QTableWidget(50, max(1, len(self.ent_leave_types)))
-        # headers
         headers = [f"Year {i}" for i in range(1, 51)]
         self.ent_tbl.setVerticalHeaderLabels(headers)
         self.ent_tbl.setHorizontalHeaderLabels(self.ent_leave_types or ["Leave"])
@@ -1256,14 +1356,19 @@ class EmployeeEditor(QDialog):
             self.id_number.setText(e.id_number or "")
             self.gender.setCurrentText(e.gender or "")
             if e.dob:
-                self.dob.setDate(QDate(e.dob.year, e.dob.month, e.dob.day))
+                self.dob.set_real_date(QDate(e.dob.year, e.dob.month, e.dob.day))
+                self._update_age()
+            else:
+                self.dob.clear()
                 self._update_age()
             self.race.setCurrentText(e.race or "")
             self.country.setCurrentText(e.country or "")
             self.residency.setCurrentText(e.residency or "")
             self._toggle_pr_date(self.residency.currentText())
             if e.pr_date:
-                self.pr_date.setDate(QDate(e.pr_date.year, e.pr_date.month, e.pr_date.day))
+                self.pr_date.set_real_date(QDate(e.pr_date.year, e.pr_date.month, e.pr_date.day))
+            else:
+                self.pr_date.clear()
 
             # Employment
             self.employment_status.setCurrentText(e.employment_status or "")
@@ -1275,14 +1380,14 @@ class EmployeeEditor(QDialog):
             self.employment_type.setCurrentText(e.employment_type or "")
 
             if e.join_date:
-                self.join_date.setDate(QDate(e.join_date.year, e.join_date.month, e.join_date.day))
-
-            # Exit date, then apply rule
-            if e.exit_date:
-                ed = QDate(e.exit_date.year, e.exit_date.month, e.exit_date.day)
-                self.exit_date.setDate(ed)
+                self.join_date.set_real_date(QDate(e.join_date.year, e.join_date.month, e.join_date.day))
             else:
-                self.exit_date.setDate(self.exit_date.minimumDate())
+                self.join_date.clear()
+
+            if e.exit_date:
+                self.exit_date.set_real_date(QDate(e.exit_date.year, e.exit_date.month, e.exit_date.day))
+            else:
+                self.exit_date.clear()
             self._sync_status_from_exit()
 
             self.holiday_group.setCurrentText(e.holiday_group or "")
@@ -1350,7 +1455,6 @@ class EmployeeEditor(QDialog):
             defs = {d.leave_type: json.loads(d.table_json or "{}") for d in s.query(LeaveDefault).all()}
         if not defs:
             QMessageBox.information(self, "Leave Defaults", "No defaults defined."); return
-        # ensure columns match current types
         self.ent_leave_types = list(defs.keys())
         self.ent_tbl.setColumnCount(len(self.ent_leave_types))
         self.ent_tbl.setHorizontalHeaderLabels(self.ent_leave_types)
@@ -1378,7 +1482,6 @@ class DropdownOptionsDialog(QDialog):
         self.setWindowTitle("Dropdown Options")
         v = QVBoxLayout(self)
 
-        # category selector
         top = QHBoxLayout()
         self.cat = QComboBox(); self.cat.addItems(MANAGED_CATEGORIES)
         self.cat.currentTextChanged.connect(self._reload_values)
@@ -1389,7 +1492,6 @@ class DropdownOptionsDialog(QDialog):
             top.addWidget(w)
         v.addLayout(top)
 
-        # values list
         self.val_list = QListWidget()
         v.addWidget(self.val_list, 1)
 
@@ -1472,7 +1574,6 @@ class LeaveDefaultsDialog(QDialog):
 
         root = QHBoxLayout(self)
 
-        # left: types list
         left = QVBoxLayout()
         self.type_list = QListWidget()
         self.type_list.currentItemChanged.connect(self._on_type_changed)
@@ -1487,7 +1588,6 @@ class LeaveDefaultsDialog(QDialog):
         btns.addWidget(add); btns.addWidget(ren); btns.addWidget(rm); btns.addStretch(1)
         left.addLayout(btns)
 
-        # right: config for selected type
         right = QVBoxLayout()
         top = QHBoxLayout()
         self.lbl_curr = QLabel("—")
@@ -1531,7 +1631,7 @@ class LeaveDefaultsDialog(QDialog):
             self.type_list.addItem(t)
         if self.type_list.count() == 0:
             self.type_list.addItem("Annual Leave")
-            self._ensure_row("Annual Leave")  # create default row
+            self._ensure_row("Annual Leave")
         self.type_list.setCurrentRow(0)
 
     def _ensure_row(self, leave_type: str):
@@ -1561,7 +1661,6 @@ class LeaveDefaultsDialog(QDialog):
         self.prorated.setCurrentText("True" if row.prorated else "False")
         self.reset.setCurrentText("True" if row.yearly_reset else "False")
 
-        # load table_json
         try:
             data = json.loads(row.table_json or "{}")
         except Exception:
@@ -1649,14 +1748,17 @@ def _employeeeditor_save(self: EmployeeEditor):
 
     def dget(qd: QDateEdit) -> date | None:
         try:
-            # treat special minimum as blank
+            # support BlankableDateEdit first
+            if hasattr(qd, "date_or_none"):
+                d = qd.date_or_none()
+                return d.toPython() if d else None
+            # fallback: treat special minimum as blank
             if qd.specialValueText() and qd.date() == qd.minimumDate():
                 return None
             return qd.date().toPython()
         except Exception:
             return None
 
-    # required field first
     name = (self.full_name.text() or "").strip()
     if not name:
         QMessageBox.warning(self, "Missing", "Full Name is required.")
@@ -1669,7 +1771,6 @@ def _employeeeditor_save(self: EmployeeEditor):
                 QMessageBox.critical(self, "Error", "Employee record not found.")
                 return
         else:
-            # allocate code BEFORE any flush
             prefix, z = EMP_CODE_PREFIX, EMP_CODE_ZPAD
             existing = [
                 c for (c,) in s.query(Employee.code)
@@ -1684,15 +1785,13 @@ def _employeeeditor_save(self: EmployeeEditor):
             nxt = (max(used) + 1) if used else 1
             code = f"{prefix}{nxt:0{z}d}"
 
-            # create with full_name set to satisfy NOT NULL
             e = Employee(account_id=tenant_id(), code=code, full_name=name)
             s.add(e)
-            s.flush()  # safe now
-
+            s.flush()
             self._emp_id = e.id
 
         # personal
-        e.full_name = name  # ensure updated on edit path too
+        e.full_name = name
         e.email = (self.email.text() or "").strip()
         e.contact_number = (self.contact.text() or "").strip()
         e.address = (self.address.text() or "").strip()
