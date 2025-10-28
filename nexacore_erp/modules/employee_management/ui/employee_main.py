@@ -14,6 +14,12 @@ from PySide6.QtWidgets import (
 from PySide6.QtWidgets import QDateEdit, QDateTimeEdit
 from PySide6.QtCore import QDate, QDateTime
 
+# ---- shared date helpers ----
+MIN_DATE = date(1900, 1, 1)
+def _fmt_date(d: date | None) -> str:
+    return "" if (not d or d <= MIN_DATE) else d.strftime("%Y-%m-%d")
+
+
 class BlankableDateEdit(QDateEdit):
     """Truly blank until a real date is set."""
     def __init__(self, display_fmt: str = "yyyy-MM-dd", *a, **kw):
@@ -75,7 +81,6 @@ from ..models import (
     WorkScheduleDay, LeaveEntitlement
 )
 
-# block wheel changes on all combo boxes
 # block wheel changes on all combo boxes
 class _NoWheelFilter(QObject):
     def eventFilter(self, obj, ev):
@@ -187,12 +192,9 @@ class EmployeeMainWidget(QWidget):
         self.quick_search = QLineEdit()
         self.quick_search.setPlaceholderText("Quick search (any column)…")
         self.quick_search.textChanged.connect(self._apply_filters)
-        btn_add = QPushButton("Add");
-        btn_add.clicked.connect(self._add_employee)
-        btn_edit = QPushButton("Edit");
-        btn_edit.clicked.connect(self._edit_employee)
-        btn_del = QPushButton("Delete");
-        btn_del.clicked.connect(self._delete_employee)
+        btn_add = QPushButton("Add"); btn_add.clicked.connect(self._add_employee)
+        btn_edit = QPushButton("Edit"); btn_edit.clicked.connect(self._edit_employee)
+        btn_del = QPushButton("Delete"); btn_del.clicked.connect(self._delete_employee)
         for w in (self.quick_search, btn_add, btn_edit, btn_del):
             actions.addWidget(w)
         lv.addLayout(actions)
@@ -215,32 +217,20 @@ class EmployeeMainWidget(QWidget):
 
         r = 0
         add_filter(r, "Status", "employment_status",
-                   lambda: self._combo_with(["", "Active", "Non-Active"]));
-        r += 1
-        add_filter(r, "Employee Code", "code", QLineEdit);
-        r += 1
-        add_filter(r, "Employee Name", "full_name", QLineEdit);
-        r += 1
-        add_filter(r, "Department", "department", QLineEdit);
-        r += 1
-        add_filter(r, "Position", "position", QLineEdit);
-        r += 1
+                   lambda: self._combo_with(["", "Active", "Non-Active"])); r += 1
+        add_filter(r, "Employee Code", "code", QLineEdit); r += 1
+        add_filter(r, "Employee Name", "full_name", QLineEdit); r += 1
+        add_filter(r, "Department", "department", QLineEdit); r += 1
+        add_filter(r, "Position", "position", QLineEdit); r += 1
         add_filter(r, "Employment Type", "employment_type",
-                   lambda: self._combo_with(["", "Full-Time", "Part-Time", "Contract"]));
-        r += 1
-        add_filter(r, "ID Type", "id_type", QLineEdit);
-        r += 1
-        add_filter(r, "ID Number", "id_number", QLineEdit);
-        r += 1
-        add_filter(r, "Country", "country", QLineEdit);
-        r += 1
+                   lambda: self._combo_with(["", "Full-Time", "Part-Time", "Contract"])); r += 1
+        add_filter(r, "ID Type", "id_type", QLineEdit); r += 1
+        add_filter(r, "ID Number", "id_number", QLineEdit); r += 1
+        add_filter(r, "Country", "country", QLineEdit); r += 1
         add_filter(r, "Residency", "residency",
-                   lambda: self._combo_with(["", "Citizen", "Permanent Resident", "Work Pass"]));
-        r += 1
-        add_filter(r, "Age ≥", "age_min", QLineEdit);
-        r += 1
-        add_filter(r, "Age ≤", "age_max", QLineEdit);
-        r += 1
+                   lambda: self._combo_with(["", "Citizen", "Permanent Resident", "Work Pass"])); r += 1
+        add_filter(r, "Age ≥", "age_min", QLineEdit); r += 1
+        add_filter(r, "Age ≤", "age_max", QLineEdit); r += 1
         fbv.addLayout(grid)
 
         self.filter_area = QScrollArea()
@@ -332,7 +322,7 @@ class EmployeeMainWidget(QWidget):
                 if val and val not in str(getattr(e, key, "") or "").lower():
                     return False
             age = None
-            if e.dob:
+            if e.dob and e.dob > MIN_DATE:
                 try:
                     age = int((datetime.utcnow().date() - e.dob).days // 365.25)
                 except Exception:
@@ -357,9 +347,9 @@ class EmployeeMainWidget(QWidget):
             department = getattr(e, "department", "") or ""
             position = e.position or ""
             employment_type = e.employment_type or ""
-            dob_txt = e.dob.strftime("%Y-%m-%d") if e.dob else ""
+            dob_txt = _fmt_date(e.dob)
             age_txt = ""
-            if e.dob:
+            if e.dob and e.dob > MIN_DATE:
                 try:
                     age_txt = str(int((datetime.utcnow().date() - e.dob).days // 365.25))
                 except Exception:
@@ -368,8 +358,8 @@ class EmployeeMainWidget(QWidget):
             id_number = e.id_number or ""
             country = e.country or ""
             residency = e.residency or ""
-            join_date = e.join_date.strftime("%Y-%m-%d") if e.join_date else ""
-            exit_date = e.exit_date.strftime("%Y-%m-%d") if e.exit_date else ""
+            join_date = _fmt_date(e.join_date)
+            exit_date = _fmt_date(e.exit_date)
 
             values = [employment_status, code, full_name, department, position, employment_type,
                       dob_txt, age_txt, id_type, id_number, country, residency, join_date, exit_date]
@@ -431,9 +421,9 @@ class EmployeeMainWidget(QWidget):
             return
 
         L = self.detail_form["labels"]
-        fmt = lambda d: d.strftime("%Y-%m-%d") if d else ""
+        fmt = _fmt_date
         age_txt = ""
-        if e.dob:
+        if e.dob and e.dob > MIN_DATE:
             try:
                 age_txt = str(int((datetime.utcnow().date() - e.dob).days // 365.25))
             except Exception:
@@ -595,25 +585,181 @@ class EmployeeMainWidget(QWidget):
         self._holiday_reload()
 
     def _holiday_import_csv(self):
+        import csv, io, re, unicodedata
+        from datetime import datetime, timedelta
+
         path, _ = QFileDialog.getOpenFileName(self, "Import Holidays CSV", "", "CSV Files (*.csv)")
-        if not path: return
-        imported = 0
-        with open(path, newline="", encoding="utf-8-sig") as f, SessionLocal() as s:
-            import csv
-            rd = csv.DictReader(f)
-            for r in rd:
-                g = (r.get("group") or r.get("Group") or "").strip()
-                n = (r.get("name") or r.get("Name") or "").strip()
-                d = (r.get("date") or r.get("Date") or "").strip()
-                if not (g and n and d): continue
+        if not path:
+            return
+
+        # --- load bytes once, then try decodes ---
+        raw = open(path, "rb").read()
+
+        def _try_decode(b: bytes, enc: str):
+            try:
+                return b.decode(enc)
+            except UnicodeDecodeError:
+                return None
+
+        text = None
+        used_enc = None
+        for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+            s = _try_decode(raw, enc)
+            if s is not None:
+                text, used_enc = s, enc
+                break
+        if text is None:
+            # last resort with replacement
+            text, used_enc = raw.decode("latin-1", "replace"), "latin-1(replace)"
+
+        # fix common junk: non-breaking spaces, smart quotes
+        text = (text.replace("\u00a0", " ")
+                .replace("\u2018", "'").replace("\u2019", "'")
+                .replace("\u201c", '"').replace("\u201d", '"'))
+
+        # --- sniff delimiter safely ---
+        try:
+            sample = text[:4096]
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+            delim = dialect.delimiter
+        except Exception:
+            delim = ","  # default
+
+        # --- header normalizer ---
+        def norm_key(k: str) -> str:
+            k = unicodedata.normalize("NFKC", k or "").strip().lower()
+            k = re.sub(r"\s+", " ", k)
+            k = k.replace("group code", "group")
+            # collapse non-alnum
+            k = re.sub(r"[^a-z0-9]+", "", k)
+            return k
+
+        # accepted header keys after normalization
+        # map to our logical fields
+        key_map = {
+            "group": "group",
+            "groupcode": "group",
+            "grp": "group",
+            "name": "name",
+            "holiday": "name",
+            "holidayname": "name",
+            "date": "date",
+            "holidaydate": "date",
+            "dt": "date",
+            # optional extras (ignored if present)
+            "ishalfday": "is_half_day",
+            "description": "description",
+            "desc": "description",
+        }
+
+        # --- parse to rows ---
+        rd = csv.reader(io.StringIO(text), delimiter=delim)
+        try:
+            raw_headers = next(rd)
+        except StopIteration:
+            QMessageBox.warning(self, "Holidays", "Empty CSV.")
+            return
+
+        headers = [key_map.get(norm_key(h), norm_key(h)) for h in raw_headers]
+
+        # indices for fields we care about
+        def idx_of(field):
+            try:
+                return headers.index(field)
+            except ValueError:
+                return -1
+
+        i_g = idx_of("group")
+        i_n = idx_of("name")
+        i_d = idx_of("date")
+
+        if min(i_g, i_n, i_d) < 0:
+            QMessageBox.warning(
+                self, "Holidays",
+                "Missing required headers. Need columns that map to: group, name, date.\n"
+                f"Detected headers: {headers}\nEncoding: {used_enc}, delimiter: '{delim}'"
+            )
+            return
+
+        def parse_date(s: str):
+            from datetime import datetime, timedelta
+            import re
+            s = (s or "").strip()
+            if not s:
+                return None
+
+            # Excel serial number
+            if re.fullmatch(r"\d{1,6}", s):
                 try:
-                    day, month, year = map(int, d.split("-")); dt = date(year, month, day)
-                    s.add(Holiday(account_id=tenant_id(), group_code=g, name=n, date=dt))
-                    s.flush(); imported += 1
+                    return (datetime(1899, 12, 30) + timedelta(days=int(s))).date()
                 except Exception:
+                    pass
+
+            # clean common punctuation
+            s = s.replace(",", "").replace(".", "")
+            s = re.sub(r"\s+", " ", s)
+
+            fmts = (
+                # ISO
+                "%Y-%m-%d",
+                # D-M-Y numeric
+                "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y",
+                "%d-%m-%y", "%d/%m/%y", "%m/%d/%y",
+                # D-Mon-Y (abbr/full) with 4y
+                "%d-%b-%Y", "%d %b %Y", "%d-%B-%Y", "%d %B %Y",
+                # D-Mon-Y (abbr/full) with 2y
+                "%d-%b-%y", "%d %b %y", "%d-%B-%y", "%d %B %y",
+            )
+            for fmt in fmts:
+                try:
+                    return datetime.strptime(s, fmt).date()
+                except Exception:
+                    continue
+            return None
+
+        inserted, skipped = 0, 0
+        reasons = []
+
+        with SessionLocal() as s:
+            for row in rd:
+                # pad short rows
+                if len(row) < len(headers):
+                    row += [""] * (len(headers) - len(row))
+
+                g = (row[i_g] if i_g >= 0 else "").strip()
+                n = (row[i_n] if i_n >= 0 else "").strip()
+                d = (row[i_d] if i_d >= 0 else "").strip()
+
+                if not g or not n or not d:
+                    skipped += 1
+                    if len(reasons) < 5:
+                        reasons.append(f"Missing field(s): group='{g}', name='{n}', date='{d}'")
+                    continue
+
+                dt = parse_date(d)
+                if not dt:
+                    skipped += 1
+                    if len(reasons) < 5:
+                        reasons.append(f"Unparsed date '{d}'")
+                    continue
+
+                try:
+                    s.add(Holiday(account_id=tenant_id(), group_code=g, name=n, date=dt))
+                    s.flush()
+                    inserted += 1
+                except Exception as ex:
                     s.rollback()
+                    skipped += 1
+                    if len(reasons) < 5:
+                        reasons.append(f"DB reject for '{g}-{n}-{dt}': {ex}")
+
             s.commit()
-        QMessageBox.information(self, "Holidays", f"Imported {imported} rows")
+
+        detail = ("\nReasons (first 5):\n- " + "\n- ".join(reasons)) if reasons else ""
+        QMessageBox.information(
+            self, "Holidays",
+            f"Encoding: {used_enc}\nDelimiter: '{delim}'\nImported: {inserted}\nSkipped: {skipped}{detail}"
+        )
         self._holiday_reload()
 
     def _holiday_template(self):
@@ -725,15 +871,14 @@ class EmployeeMainWidget(QWidget):
         ]
         ws.append(headers)
 
-        fmt = lambda d: d.strftime("%Y-%m-%d") if d else ""
         for e in emps:
             ws.append([
                 e.code or "", e.full_name or "", e.email or "", e.contact_number or "", e.address or "",
-                e.id_type or "", e.id_number or "", e.gender or "", fmt(e.dob), e.race or "", e.country or "",
-                e.residency or "", fmt(e.pr_date),
+                e.id_type or "", e.id_number or "", e.gender or "", _fmt_date(e.dob), e.race or "", e.country or "",
+                e.residency or "", _fmt_date(e.pr_date),
                 e.employment_status or "", e.employment_pass or "", e.work_permit_number or "",
                 getattr(e, "department", "") or "", e.position or "", e.employment_type or "",
-                fmt(e.join_date), fmt(e.exit_date), e.holiday_group or "",
+                _fmt_date(e.join_date), _fmt_date(e.exit_date), e.holiday_group or "",
                 e.bank or "", e.bank_account or "",
                 e.incentives or 0.0, e.allowance or 0.0, e.overtime_rate or 0.0, e.parttime_rate or 0.0, e.levy or 0.0,
                 e.basic_salary or 0.0
@@ -802,12 +947,14 @@ class EmployeeMainWidget(QWidget):
         def to_date(x):
             try:
                 if isinstance(x, str):
-                    return datetime.strptime(x.strip(), "%Y-%m-%d").date()
-                if isinstance(x, date):
-                    return x
+                    d = datetime.strptime(x.strip(), "%Y-%m-%d").date()
+                elif isinstance(x, date):
+                    d = x
+                else:
+                    return None
+                return None if d <= MIN_DATE else d
             except Exception:
                 return None
-            return None
 
         def to_float(x):
             try:
@@ -1136,7 +1283,7 @@ class EmployeeEditor(QDialog):
         for name in (
                 "id_type", "gender", "race", "country", "residency",
                 "employment_status", "employment_pass", "department",
-                "position", "employment_type", "holiday_group", "bank"  # <- fixed
+                "position", "employment_type", "holiday_group", "bank"
         ):
             w = getattr(self, name, None)
             if isinstance(w, QComboBox):
