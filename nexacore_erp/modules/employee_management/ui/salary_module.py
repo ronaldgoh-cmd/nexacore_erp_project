@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QTextBrowser, QTableWidgetSelectionRange, QSizePolicy, QScrollArea, QFrame
 )
 
-from ....core.database import SessionLocal
+from ....core.database import get_employee_session as SessionLocal
 from ....core.tenant import id as tenant_id
 from ..models import Employee
 from ....core.models import CompanySettings

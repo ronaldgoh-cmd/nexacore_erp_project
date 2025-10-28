@@ -1,73 +1,86 @@
-import os
-import pkgutil
-import importlib
-from sqlalchemy import create_engine, event, text
-from sqlalchemy.orm import sessionmaker, DeclarativeBase
+# nexacore_erp/core/database.py
+from __future__ import annotations
 
-DB_URL = os.getenv("NEXACORE_DB_URL", "sqlite:///./nexacore.db")
+from pathlib import Path
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker, declarative_base
 
+# ---------- paths ----------
+PKG_DIR = Path(__file__).resolve().parents[1]          # .../nexacore_erp
+DATA_DIR = PKG_DIR / "database"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-class Base(DeclarativeBase):
-    pass
+def _sqlite_url(p: Path) -> str:
+    return "sqlite:///" + p.as_posix()
 
+# ---------- ORM Base for CORE models ----------
+# core/models.py does: from .database import Base
+Base = declarative_base()
 
-engine = create_engine(DB_URL, pool_pre_ping=True, future=True)
+# ---------- MAIN framework DB (users, settings, modules) ----------
+MAIN_DB_PATH = DATA_DIR / "nexacore_main.db"
+MAIN_ENGINE = create_engine(
+    _sqlite_url(MAIN_DB_PATH),
+    connect_args={"check_same_thread": False},
+    pool_pre_ping=True,
+    future=True,
+)
+SessionMain = sessionmaker(bind=MAIN_ENGINE, autocommit=False, autoflush=False, future=True)
+# Back-compat alias
+SessionLocal = SessionMain
 
-# SQLite: enforce FKs
-if DB_URL.startswith("sqlite"):
-    @event.listens_for(engine, "connect")
-    def _fk_on(dbapi_con, _):
-        cur = dbapi_con.cursor()
-        cur.execute("PRAGMA foreign_keys=ON")
-        cur.close()
+def init_db() -> None:
+    """Create core tables on the main database. Import inside to avoid circulars."""
+    from . import models as core_models  # noqa: F401
+    Base.metadata.create_all(bind=MAIN_ENGINE)
+    with MAIN_ENGINE.connect() as conn:
+        conn.execute(text("PRAGMA foreign_keys = ON"))
 
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+# ---------- Module databases (separate .db per module) ----------
+MODULE_DB_FILES = {
+    "employee_management": "nexacore_employeemanagement.db",
+    # add future modules here as needed
+}
 
+_module_engines: dict[str, any] = {}
+_module_sessions: dict[str, sessionmaker] = {}
 
-def _sqlite_add_missing_columns():
-    """One-time patch for existing SQLite DBs."""
-    if not DB_URL.startswith("sqlite"):
-        return
-    with engine.begin() as conn:
-        # company_settings columns
-        exists = conn.exec_driver_sql(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='company_settings'"
-        ).fetchone()
-        if exists:
-            cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(company_settings)")]
-            if "version" not in cols:
-                conn.execute(text("ALTER TABLE company_settings ADD COLUMN version TEXT DEFAULT ''"))
-            if "about" not in cols:
-                conn.execute(text("ALTER TABLE company_settings ADD COLUMN about TEXT DEFAULT ''"))
+def _module_db_path(module_key: str) -> Path:
+    filename = MODULE_DB_FILES.get(module_key)
+    if not filename:
+        safe = "".join(ch for ch in module_key if ch.isalnum()).lower()
+        filename = f"nexacore_{safe}.db"
+        MODULE_DB_FILES[module_key] = filename
+    return DATA_DIR / filename
 
-        # employees.department column
-        exists = conn.exec_driver_sql(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='employees'"
-        ).fetchone()
-        if exists:
-            cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(employees)")]
-            if "department" not in cols:
-                conn.execute(text("ALTER TABLE employees ADD COLUMN department VARCHAR(255) DEFAULT ''"))
+def get_module_engine(module_key: str):
+    eng = _module_engines.get(module_key)
+    if eng is None:
+        p = _module_db_path(module_key)
+        eng = create_engine(
+            _sqlite_url(p),
+            connect_args={"check_same_thread": False},
+            pool_pre_ping=True,
+            future=True,
+        )
+        _module_engines[module_key] = eng
+        with eng.connect() as c:
+            c.execute(text("PRAGMA foreign_keys = ON"))
+    return eng
 
+def get_module_sessionmaker(module_key: str) -> sessionmaker:
+    sm = _module_sessions.get(module_key)
+    if sm is None:
+        eng = get_module_engine(module_key)
+        sm = sessionmaker(bind=eng, autocommit=False, autoflush=False, future=True)
+        _module_sessions[module_key] = sm
+    return sm
 
-def _import_module_models():
-    """Import nexacore_erp.modules.*.models so plugin tables are registered."""
-    try:
-        from nexacore_erp import modules as modules_pkg
-    except Exception:
-        return
-    prefix = modules_pkg.__name__ + "."
-    for _, modname, ispkg in pkgutil.walk_packages(modules_pkg.__path__, prefix):
-        if modname.endswith(".models"):
-            try:
-                importlib.import_module(modname)
-            except Exception:
-                # Ignore broken plugin models during startup
-                pass
+def init_module_db(module_key: str, base_metadata) -> None:
+    """Create tables for a module's SQLAlchemy Base on its own DB."""
+    eng = get_module_engine(module_key)
+    base_metadata.create_all(bind=eng)
 
-
-def init_db():
-    from . import models  # register core tables
-    _import_module_models()  # register plugin tables
-    Base.metadata.create_all(bind=engine)
-    _sqlite_add_missing_columns()
+# Convenience for Employee Management
+def get_employee_session():
+    return get_module_sessionmaker("employee_management")()

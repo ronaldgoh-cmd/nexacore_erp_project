@@ -74,7 +74,7 @@ except Exception:
     DataValidation = None
     get_column_letter = None
 
-from ....core.database import SessionLocal
+from ....core.database import get_employee_session as SessionLocal
 from ....core.tenant import id as tenant_id
 from ..models import (
     Employee, SalaryHistory, Holiday, DropdownOption, LeaveDefault,
@@ -931,36 +931,84 @@ class EmployeeMainWidget(QWidget):
             QMessageBox.warning(self, "Import", f"Cannot open workbook: {ex}")
             return
 
-        headers = {}
+        # --- header normalization to kill NBSP/zero-width and case differences ---
+        def _norm_header(s: str) -> str:
+            if not isinstance(s, str):
+                return ""
+            return re.sub(r"[\u00A0\u200B-\u200D\uFEFF]", "", s).strip().lower()
+
+        headers: dict[str, int] = {}
         for c in range(1, ws.max_column + 1):
             h = ws.cell(1, c).value
-            if isinstance(h, str) and h.strip():
-                headers[h.strip().lower()] = c
+            key = _norm_header(h) if isinstance(h, str) else ""
+            if key:
+                headers[key] = c
+
         if "full name" not in headers and "employee code" not in headers:
             QMessageBox.warning(self, "Import", "Sheet needs 'Full Name' or 'Employee Code'.")
             return
 
-        def gv(row, name):
-            c = headers.get(name.lower())
-            return ws.cell(row, c).value if c else None
+        # get value by any of several names
+        def gv(row, *names):
+            for name in names:
+                c = headers.get(_norm_header(name))
+                if c:
+                    return ws.cell(row, c).value
+            return None
 
         def to_date(x):
-            try:
-                if isinstance(x, str):
-                    d = datetime.strptime(x.strip(), "%Y-%m-%d").date()
-                elif isinstance(x, date):
-                    d = x
-                else:
-                    return None
-                return None if d <= MIN_DATE else d
-            except Exception:
+            # Accept ISO, Singapore-style, Excel serials (number or numeric string). Blank-like tokens -> None.
+            BLANKS = {None, "", "-", "--", "—", "N/A", "NA"}
+            if x in BLANKS:
                 return None
+
+            # Excel datetime/date objects
+            if isinstance(x, datetime):
+                d = x.date()
+                return None if d <= MIN_DATE else d
+            if isinstance(x, date):
+                return None if x <= MIN_DATE else x
+
+            # Excel serials (numbers)
+            if isinstance(x, (int, float)):
+                try:
+                    from openpyxl.utils.datetime import from_excel, CALENDAR_WINDOWS_1900 as CAL
+                    d = from_excel(x, CAL).date()
+                    return None if d <= MIN_DATE else d
+                except Exception:
+                    pass  # fall through
+
+            # Strings in common formats or numeric serials
+            if isinstance(x, str):
+                s = x.strip()
+                if re.fullmatch(r"\d{1,6}", s):
+                    try:
+                        from openpyxl.utils.datetime import from_excel, CALENDAR_WINDOWS_1900 as CAL
+                        d = from_excel(int(s), CAL).date()
+                        return None if d <= MIN_DATE else d
+                    except Exception:
+                        pass
+                for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d", "%d.%m.%Y"):
+                    try:
+                        d = datetime.strptime(s, fmt).date()
+                        return None if d <= MIN_DATE else d
+                    except Exception:
+                        continue
+                return None
+
+            return None
 
         def to_float(x):
             try:
                 return float(x)
             except Exception:
                 return 0.0
+
+        def to_str(x):
+            s = "" if x is None else str(x)
+            # remove NBSP and zero-width, trim
+            s = re.sub(r"[\u00A0\u200B-\u200D\uFEFF]", "", s).strip()
+            return "" if s in ("-", "--") else s
 
         created = updated = 0
         with SessionLocal() as s:
@@ -992,11 +1040,11 @@ class EmployeeMainWidget(QWidget):
                 if not any((ws.cell(r, c).value not in (None, "", " ")) for c in range(1, ws.max_column + 1)):
                     continue
 
-                code_raw = gv(r, "Employee Code") or gv(r, "code")
-                name_raw = gv(r, "Full Name") or gv(r, "full_name")
+                code_raw = gv(r, "Employee Code", "code")
+                name_raw = gv(r, "Full Name", "full_name")
 
-                code = (str(code_raw).strip() if code_raw is not None else "")
-                full_name = (str(name_raw).strip() if name_raw is not None else "")
+                code = to_str(code_raw)
+                full_name = to_str(name_raw)
 
                 if not code and not full_name:
                     continue
@@ -1020,35 +1068,35 @@ class EmployeeMainWidget(QWidget):
                     if full_name:
                         e.full_name = full_name
 
-                e.email = str(gv(r, "Email") or gv(r, "email") or "")
-                e.contact_number = str(gv(r, "Contact Number") or gv(r, "contact_number") or "")
-                e.address = str(gv(r, "Address") or gv(r, "address") or "")
-                e.id_type = str(gv(r, "ID Type") or gv(r, "id_type") or "")
-                e.id_number = str(gv(r, "ID Number") or gv(r, "id_number") or "")
-                e.gender = str(gv(r, "Gender") or gv(r, "gender") or "")
-                e.dob = to_date(gv(r, "Date of Birth") or gv(r, "dob"))
-                e.race = str(gv(r, "Race") or gv(r, "race") or "")
-                e.country = str(gv(r, "Country") or gv(r, "country") or "")
-                e.residency = str(gv(r, "Residency") or gv(r, "residency") or "")
-                e.pr_date = to_date(gv(r, "PR Date") or gv(r, "pr_date"))
-                e.employment_status = str(gv(r, "Employment Status") or gv(r, "employment_status") or "")
-                e.employment_pass = str(gv(r, "Employment Pass") or gv(r, "employment_pass") or "")
-                e.work_permit_number = str(gv(r, "Work Permit Number") or gv(r, "work_permit_number") or "")
-                e.department = str(gv(r, "Department") or gv(r, "department") or "")
-                e.position = str(gv(r, "Position") or gv(r, "position") or "")
-                e.employment_type = str(gv(r, "Employment Type") or gv(r, "employment_type") or "")
-                e.join_date = to_date(gv(r, "Join Date") or gv(r, "join_date"))
-                e.exit_date = to_date(gv(r, "Exit Date") or gv(r, "exit_date"))
-                e.holiday_group = str(gv(r, "Holiday Group") or gv(r, "holiday_group") or "")
-                e.bank = str(gv(r, "Bank") or gv(r, "bank") or "")
-                e.bank_account = str(gv(r, "Account Number") or gv(r, "bank_account") or "")
+                e.email = to_str(gv(r, "Email", "email"))
+                e.contact_number = to_str(gv(r, "Contact Number", "contact_number"))
+                e.address = to_str(gv(r, "Address", "address"))
+                e.id_type = to_str(gv(r, "ID Type", "id_type"))
+                e.id_number = to_str(gv(r, "ID Number", "id_number"))
+                e.gender = to_str(gv(r, "Gender", "gender"))
+                e.dob = to_date(gv(r, "Date of Birth", "dob"))
+                e.race = to_str(gv(r, "Race", "race"))
+                e.country = to_str(gv(r, "Country", "country"))
+                e.residency = to_str(gv(r, "Residency", "residency"))
+                e.pr_date = to_date(gv(r, "PR Date", "pr_date"))
+                e.employment_status = to_str(gv(r, "Employment Status", "employment_status"))
+                e.employment_pass = to_str(gv(r, "Employment Pass", "employment_pass"))
+                e.work_permit_number = to_str(gv(r, "Work Permit Number", "work_permit_number"))
+                e.department = to_str(gv(r, "Department", "department"))
+                e.position = to_str(gv(r, "Position", "position"))
+                e.employment_type = to_str(gv(r, "Employment Type", "employment_type"))
+                e.join_date = to_date(gv(r, "Join Date", "join_date"))
+                e.exit_date = to_date(gv(r, "Exit Date", "exit_date"))
+                e.holiday_group = to_str(gv(r, "Holiday Group", "holiday_group"))
+                e.bank = to_str(gv(r, "Bank", "bank"))
+                e.bank_account = to_str(gv(r, "Account Number", "bank_account"))
 
-                e.incentives = to_float(gv(r, "Incentives") or gv(r, "incentives"))
-                e.allowance = to_float(gv(r, "Allowance") or gv(r, "allowance"))
-                e.overtime_rate = to_float(gv(r, "Overtime Rate") or gv(r, "overtime_rate"))
-                e.parttime_rate = to_float(gv(r, "Part Time Rate") or gv(r, "parttime_rate"))
-                e.levy = to_float(gv(r, "Levy") or gv(r, "levy"))
-                b = gv(r, "Basic Salary") or gv(r, "basic_salary")
+                e.incentives = to_float(gv(r, "Incentives", "incentives"))
+                e.allowance = to_float(gv(r, "Allowance", "allowance"))
+                e.overtime_rate = to_float(gv(r, "Overtime Rate", "overtime_rate"))
+                e.parttime_rate = to_float(gv(r, "Part Time Rate", "parttime_rate"))
+                e.levy = to_float(gv(r, "Levy", "levy"))
+                b = gv(r, "Basic Salary", "basic_salary")
                 if b is not None:
                     try:
                         e.basic_salary = float(b)

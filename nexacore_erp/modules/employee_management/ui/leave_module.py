@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 # Project imports (keep these paths)
-from ....core.database import SessionLocal
+from ....core.database import get_employee_session as SessionLocal
 from ....core.tenant import id as tenant_id
 from ..models import Employee  # must exist
 MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"]
