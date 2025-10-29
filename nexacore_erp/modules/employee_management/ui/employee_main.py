@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QListWidgetItem, QHeaderView, QAbstractItemView, QSizePolicy, QListWidget,
     QInputDialog, QApplication, QDateTimeEdit
 )
+from PySide6.QtWidgets import QDoubleSpinBox
 from PySide6.QtWidgets import QDateEdit, QDateTimeEdit
 from PySide6.QtCore import QDate, QDateTime
 
@@ -1647,15 +1648,28 @@ class EmployeeEditor(QDialog):
 
     def _load_defaults_into_entitlements(self):
         with SessionLocal() as s:
-            defs = {d.leave_type: json.loads(d.table_json or "{}") for d in s.query(LeaveDefault).all()}
-        if not defs:
-            QMessageBox.information(self, "Leave Defaults", "No defaults defined."); return
-        self.ent_leave_types = list(defs.keys())
+            raw = {d.leave_type: json.loads(d.table_json or "{}") for d in s.query(LeaveDefault).all()}
+        if not raw:
+            QMessageBox.information(self, "Leave Defaults", "No defaults defined.")
+            return
+
+        # Accept both new {"years": {...}, "_meta": {...}} and old plain dict
+        years_map: dict[str, dict[str, int]] = {}
+        for lt, blob in raw.items():
+            if isinstance(blob, dict) and "years" in blob and isinstance(blob["years"], dict):
+                years_map[lt] = {k: int(v) for k, v in blob["years"].items()}
+            elif isinstance(blob, dict):
+                years_map[lt] = {k: int(v) for k, v in blob.items()}
+            else:
+                years_map[lt] = {}
+
+        self.ent_leave_types = list(years_map.keys())
         self.ent_tbl.setColumnCount(len(self.ent_leave_types))
         self.ent_tbl.setHorizontalHeaderLabels(self.ent_leave_types)
+
         for r in range(50):
             for c, t in enumerate(self.ent_leave_types):
-                val = defs.get(t, {}).get(str(r + 1), 0)
+                val = years_map.get(t, {}).get(str(r + 1), 0)
                 self.ent_tbl.setItem(r, c, QTableWidgetItem(str(val)))
 
     # --- utils ---
@@ -1759,16 +1773,30 @@ class DropdownOptionsDialog(QDialog):
             return inp.text(), True
         return "", False
 
-
 # ---- Leave Defaults dialog ----
 class LeaveDefaultsDialog(QDialog):
+    """
+    Stores per-leave settings inside LeaveDefault:
+      - columns: prorated (bool)
+      - columns: yearly_reset (bool)  <- derived from carry policy: Reset=True, Bring Forward=False
+      - table_json: {
+            "years": {"1": 14, "2": 14, ...},
+            "_meta": {
+                "carry_policy": "reset" | "bring",
+                "carry_limit_enabled": true|false,
+                "carry_limit": 0.0   # max days carried if enabled
+            }
+        }
+    Backward compatible with old table_json that was a plain {"1": days,...}.
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Leave Defaults")
-        self.resize(720, 480)
+        self.resize(760, 520)
 
         root = QHBoxLayout(self)
 
+        # left: type list
         left = QVBoxLayout()
         self.type_list = QListWidget()
         self.type_list.currentItemChanged.connect(self._on_type_changed)
@@ -1783,21 +1811,43 @@ class LeaveDefaultsDialog(QDialog):
         btns.addWidget(add); btns.addWidget(ren); btns.addWidget(rm); btns.addStretch(1)
         left.addLayout(btns)
 
+        # right: settings + table
         right = QVBoxLayout()
+
         top = QHBoxLayout()
         self.lbl_curr = QLabel("—")
         top.addWidget(QLabel("Selected:")); top.addWidget(self.lbl_curr); top.addStretch(1)
         right.addLayout(top)
 
-        meta = QHBoxLayout()
+        # --- settings row ---
+        meta1 = QHBoxLayout()
+        # A) Pro-rated?
         self.prorated = QComboBox(); self.prorated.addItems(["False", "True"])
-        self.reset = QComboBox(); self.reset.addItems(["True", "False"])
-        meta.addWidget(QLabel("Prorated?")); meta.addWidget(self.prorated)
-        meta.addSpacing(16)
-        meta.addWidget(QLabel("Annual reset?")); meta.addWidget(self.reset)
-        meta.addStretch(1)
-        right.addLayout(meta)
+        meta1.addWidget(QLabel("Pro-rated?")); meta1.addWidget(self.prorated)
+        meta1.addSpacing(24)
 
+        # B) Year-end handling: Reset or Bring forward
+        self.carry_policy = QComboBox(); self.carry_policy.addItems(["Reset", "Bring forward"])
+        self.carry_policy.currentTextChanged.connect(self._toggle_carry_ui)
+        meta1.addWidget(QLabel("Year-end handling")); meta1.addWidget(self.carry_policy)
+        meta1.addStretch(1)
+        right.addLayout(meta1)
+
+        # C) Carry-forward limit controls
+        meta2 = QHBoxLayout()
+        self.carry_limit_enable = QCheckBox("Limit Bring Forward")
+        self.carry_limit_enable.toggled.connect(self._toggle_carry_ui)
+        self.carry_limit = QDoubleSpinBox()
+        self.carry_limit.setRange(0.0, 365.0)
+        self.carry_limit.setDecimals(1)
+        self.carry_limit.setSingleStep(0.5)
+        self.carry_limit.setSuffix(" day(s)")
+        meta2.addWidget(self.carry_limit_enable)
+        meta2.addWidget(self.carry_limit)
+        meta2.addStretch(1)
+        right.addLayout(meta2)
+
+        # table of years
         self.tbl = QTableWidget(50, 2)
         self.tbl.setHorizontalHeaderLabels(["Year", "Days"])
         for i in range(50):
@@ -1806,6 +1856,7 @@ class LeaveDefaultsDialog(QDialog):
         self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         right.addWidget(self.tbl, 1)
 
+        # save button
         save_row = QHBoxLayout()
         save = QPushButton("Save"); save.clicked.connect(self._save_current)
         save.setMaximumWidth(120)
@@ -1816,8 +1867,14 @@ class LeaveDefaultsDialog(QDialog):
         root.addLayout(right, 2)
 
         self._load_types()
+        self._toggle_carry_ui()  # initial UI state
 
-    # --- data I/O ---
+    # ---------- helpers ----------
+    def _toggle_carry_ui(self):
+        bring = (self.carry_policy.currentText() == "Bring forward")
+        self.carry_limit_enable.setEnabled(bring)
+        self.carry_limit.setEnabled(bring and self.carry_limit_enable.isChecked())
+
     def _load_types(self):
         self.type_list.clear()
         with SessionLocal() as s:
@@ -1833,15 +1890,17 @@ class LeaveDefaultsDialog(QDialog):
         with SessionLocal() as s:
             row = s.query(LeaveDefault).filter(LeaveDefault.leave_type == leave_type).first()
             if not row:
-                table = {str(i + 1): 14 for i in range(50)}
+                years = {str(i + 1): 14 for i in range(50)}
+                meta = {"carry_policy": "reset", "carry_limit_enabled": False, "carry_limit": 0.0}
                 s.add(LeaveDefault(
                     account_id=tenant_id(), leave_type=leave_type,
                     prorated=False, yearly_reset=True,
-                    table_json=json.dumps(table)
+                    table_json=json.dumps({"years": years, "_meta": meta})
                 ))
                 s.commit()
 
-    def _on_type_changed(self, curr, prev):
+    # ---------- load UI for selected type ----------
+    def _on_type_changed(self, curr, _prev):
         if not curr:
             return
         typ = curr.text()
@@ -1853,49 +1912,95 @@ class LeaveDefaultsDialog(QDialog):
             with SessionLocal() as s:
                 row = s.query(LeaveDefault).filter(LeaveDefault.leave_type == typ).first()
 
+        # columns
         self.prorated.setCurrentText("True" if row.prorated else "False")
-        self.reset.setCurrentText("True" if row.yearly_reset else "False")
 
+        # unpack table_json with backward compatibility
         try:
-            data = json.loads(row.table_json or "{}")
+            blob = json.loads(row.table_json or "{}")
         except Exception:
-            data = {}
+            blob = {}
+
+        if "years" in blob and isinstance(blob["years"], dict):
+            years = blob["years"]
+            meta = blob.get("_meta", {})
+        else:
+            years = blob if isinstance(blob, dict) else {}
+            meta = {}
+
+        # meta defaults
+        carry_policy = meta.get("carry_policy", "reset")  # "reset" | "bring"
+        self.carry_policy.setCurrentText("Bring forward" if carry_policy == "bring" else "Reset")
+        self.carry_limit_enable.setChecked(bool(meta.get("carry_limit_enabled", False)))
+        try:
+            self.carry_limit.setValue(float(meta.get("carry_limit", 0.0)))
+        except Exception:
+            self.carry_limit.setValue(0.0)
+        # derived legacy column
+        row.yearly_reset = (carry_policy != "bring")
+        with SessionLocal() as s:
+            s.merge(row); s.commit()
+
+        # fill table
         for i in range(50):
             self.tbl.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-            self.tbl.setItem(i, 1, QTableWidgetItem(str(data.get(str(i + 1), 14))))
+            self.tbl.setItem(i, 1, QTableWidgetItem(str(years.get(str(i + 1), 14))))
 
+        self._toggle_carry_ui()
+
+    # ---------- save ----------
     def _save_current(self):
         itm = self.type_list.currentItem()
-        if not itm: return
+        if not itm:
+            return
         typ = itm.text()
-        table = {str(i + 1): self._int_or_zero(self.tbl.item(i, 1)) for i in range(50)}
+
+        # years grid
+        years = {str(i + 1): self._int_or_zero(self.tbl.item(i, 1)) for i in range(50)}
+
+        # meta
+        carry_policy = "bring" if self.carry_policy.currentText() == "Bring forward" else "reset"
+        meta = {
+            "carry_policy": carry_policy,
+            "carry_limit_enabled": self.carry_limit_enable.isChecked(),
+            "carry_limit": float(self.carry_limit.value()),
+        }
+
         with SessionLocal() as s:
             row = s.query(LeaveDefault).filter(LeaveDefault.leave_type == typ).first()
             if not row:
                 row = LeaveDefault(account_id=tenant_id(), leave_type=typ)
                 s.add(row)
+
             row.prorated = (self.prorated.currentText() == "True")
-            row.yearly_reset = (self.reset.currentText() == "True")
-            row.table_json = json.dumps(table)
+            # keep legacy column in sync with policy
+            row.yearly_reset = (carry_policy != "bring")
+
+            row.table_json = json.dumps({"years": years, "_meta": meta})
             s.commit()
+
         QMessageBox.information(self, "Leave Defaults", f"Saved '{typ}'")
 
-    # --- CRUD for types ---
+    # ---------- CRUD for types ----------
     def _add_type(self):
         name, ok = QInputDialog.getText(self, "Add Leave Type", "Name:")
-        if not ok or not name.strip(): return
+        if not ok or not name.strip():
+            return
         name = name.strip()
         self._ensure_row(name)
         self._load_types()
         items = self.type_list.findItems(name, Qt.MatchExactly)
-        if items: self.type_list.setCurrentItem(items[0])
+        if items:
+            self.type_list.setCurrentItem(items[0])
 
     def _rename_type(self):
         itm = self.type_list.currentItem()
-        if not itm: return
+        if not itm:
+            return
         old = itm.text()
         new, ok = QInputDialog.getText(self, "Rename Leave Type", "New name:", text=old)
-        if not ok or not new.strip() or new == old: return
+        if not ok or not new.strip() or new == old:
+            return
         new = new.strip()
         with SessionLocal() as s:
             row = s.query(LeaveDefault).filter(LeaveDefault.leave_type == old).first()
@@ -1904,17 +2009,20 @@ class LeaveDefaultsDialog(QDialog):
                 s.commit()
         self._load_types()
         items = self.type_list.findItems(new, Qt.MatchExactly)
-        if items: self.type_list.setCurrentItem(items[0])
+        if items:
+            self.type_list.setCurrentItem(items[0])
 
     def _delete_type(self):
         itm = self.type_list.currentItem()
-        if not itm: return
+        if not itm:
+            return
         typ = itm.text()
         if QMessageBox.question(self, "Delete", f"Delete leave type '{typ}'?") != QMessageBox.Yes:
             return
         with SessionLocal() as s:
             rows = s.query(LeaveDefault).filter(LeaveDefault.leave_type == typ).all()
-            for r in rows: s.delete(r)
+            for r in rows:
+                s.delete(r)
             s.commit()
         self._load_types()
 
