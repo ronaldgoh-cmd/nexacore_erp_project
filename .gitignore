@@ -14,7 +14,6 @@ ENV/
 Thumbs.db
 
 *.sqlite*
-*.db*
 *.log
 .env
 .env.*
