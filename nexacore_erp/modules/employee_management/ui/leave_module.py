@@ -1,6 +1,7 @@
 # leave_module.py
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timedelta
 from typing import Optional, Dict, List, Tuple, Set
 
@@ -14,10 +15,11 @@ from PySide6.QtWidgets import (
 # Project imports (keep these paths)
 from ....core.database import get_employee_session as SessionLocal
 from ....core.tenant import id as tenant_id
-from ..models import Employee, LeaveDefault, WorkScheduleDay, Holiday  # use employee DB models
+from ..models import Employee, LeaveDefault, WorkScheduleDay, Holiday  # employee DB models
 
 MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"]
 _MIN_DATE = date(1900, 1, 1)
+
 
 # ----------------------------
 # Internal DB helpers (safe)
@@ -45,11 +47,13 @@ def _table_exists(session, table_name: str) -> bool:
     """
     return bool(_safe_scalar(session, sql, {"name": table_name}, 0))
 
-# --------------------------------------
-# Entitlement logic (uses Employee module settings)
-# --------------------------------------
+
+# ----------------------------
+# Date / service helpers
+# ----------------------------
 
 def _months_since(d0: date, d1: date) -> int:
+    """Whole months from d0 to d1. June→Dec inclusive for same-year is 6."""
     if not d0 or d0 <= _MIN_DATE or d1 < d0:
         return 0
     return (d1.year - d0.year) * 12 + (d1.month - d0.month) - (0 if d1.day >= d0.day else 1)
@@ -58,112 +62,260 @@ def _service_year_idx(join: date, asof: date) -> int:
     m = _months_since(join, asof)
     return max(1, m // 12 + 1)
 
-def _years_map_of(blob) -> Dict[str, int]:
+def _emp_join_date(emp: Employee) -> date:
+    for name in ("join_date", "date_employment", "date_join", "employment_date"):
+        if hasattr(emp, name):
+            v = getattr(emp, name)
+            if isinstance(v, date):
+                return v
+    return _MIN_DATE
+
+def _add_months(d: date, n: int) -> date:
+    """Return d shifted by n months; clamp day to 1 for our use."""
+    y = d.year + (d.month - 1 + n) // 12
+    m = (d.month - 1 + n) % 12 + 1
+    return date(y, m, 1)
+
+
+# ----------------------------
+# Leave Defaults (years + meta)
+# ----------------------------
+
+def _years_map_of(blob) -> Dict[str, float]:
     if isinstance(blob, dict) and "years" in blob and isinstance(blob["years"], dict):
-        return {str(k): int(v) for k, v in blob["years"].items()}
+        return {str(k): float(v) for k, v in blob["years"].items()}
     if isinstance(blob, dict):
-        return {str(k): int(v) for k, v in blob.items()}
+        return {str(k): float(v) for k, v in blob.items()}
     return {}
 
 def _meta_of(blob) -> dict:
     if isinstance(blob, dict) and "_meta" in blob and isinstance(blob["_meta"], dict):
-        return blob["_meta"]
-    return {"carry_policy": "reset", "carry_limit_enabled": False, "carry_limit": 0.0}
+        m = blob["_meta"]
+    else:
+        m = {}
+    return {
+        "carry_policy": str(m.get("carry_policy", "reset")).lower(),  # "reset" | "bring"
+        "carry_limit_enabled": bool(m.get("carry_limit_enabled", False)),
+        "carry_limit": float(m.get("carry_limit", 0.0)),
+        "prorated": bool(m.get("prorated", False)),
+    }
 
-def _allow_for_year(years: Dict[str, int], yidx: int) -> float:
+def _collect_years_from_row(row: LeaveDefault) -> Dict[str, float]:
+    """
+    Accept:
+      - table_json with {"years":{"1":7,"2":8,...}} or {"1":7,...}
+      - columns year1..year20 or y1..y20
+    """
+    years: Dict[str, float] = {}
+    # JSON path
+    try:
+        blob = json_load(getattr(row, "table_json", "") or "{}")
+        years.update(_years_map_of(blob))
+    except Exception:
+        pass
+    # Column path
+    for attr in dir(row):
+        m = re.fullmatch(r"(?:year|y)_?(\d{1,2})", attr, flags=re.IGNORECASE)
+        if not m:
+            continue
+        n = int(m.group(1))
+        if n <= 0:
+            continue
+        try:
+            val = getattr(row, attr)
+        except Exception:
+            val = None
+        if val is None:
+            continue
+        try:
+            years[str(n)] = float(val)
+        except Exception:
+            try:
+                years[str(n)] = float(str(val).strip())
+            except Exception:
+                continue
+    # keep ordered positives only
+    ord_years = {}
+    for k, v in sorted(((int(k), v) for k, v in years.items() if v is not None), key=lambda x: x[0]):
+        ord_years[str(k)] = float(v)
+    return ord_years
+
+def _allow_for_year(years: Dict[str, float], yidx: int) -> float:
     if not years:
         return 0.0
     ks = sorted(int(k) for k in years.keys())
     y = min(max(1, yidx), ks[-1])
-    return float(years.get(str(y), 0))
-
-def _accrual_prorated(join: date, asof: date, years: Dict[str, int]) -> float:
-    if not join or join <= _MIN_DATE or asof < join:
-        return 0.0
-    total_m = _months_since(join, asof)
-    full_y = total_m // 12
-    rem_m = total_m % 12
-    acc = 0.0
-    for i in range(1, full_y + 1):
-        acc += _allow_for_year(years, i)
-    if rem_m > 0:
-        acc += (rem_m / 12.0) * _allow_for_year(years, full_y + 1)
-    return acc
-
-def _accrual_nonprorated(join: date, asof: date, years: Dict[str, int]) -> float:
-    if not join or join <= _MIN_DATE or asof < join:
-        return 0.0
-    yidx = _service_year_idx(join, asof)
-    acc = 0.0
-    for i in range(1, yidx + 1):
-        acc += _allow_for_year(years, i)
-    return acc
-
-def _current_year_prorated(join: date, asof: date, years: Dict[str, int]) -> float:
-    if not join or join <= _MIN_DATE or asof < join:
-        return 0.0
-    jan1 = date(asof.year, 1, 1)
-    start = max(jan1, join)
-    months = _months_since(start, asof)
-    if months <= 0:
-        return 0.0
-    yidx = _service_year_idx(join, asof)
-    return (months % 12) / 12.0 * _allow_for_year(years, yidx)
+    return float(years.get(str(y), 0.0))
 
 def _fetch_leave_defaults(session, leave_type: str):
+    """Return (prorated, years_map, meta_dict)."""
     row = session.query(LeaveDefault).filter(LeaveDefault.leave_type == leave_type).first()
     if not row:
-        return False, {}, {"carry_policy": "reset", "carry_limit_enabled": False, "carry_limit": 0.0}
+        return False, {}, {"carry_policy": "reset", "carry_limit_enabled": False, "carry_limit": 0.0, "prorated": False}
+    years = _collect_years_from_row(row)
+    # meta from JSON if present; defaults otherwise
     try:
-        blob = json_load(row.table_json or "{}")
+        blob = json_load(getattr(row, "table_json", "") or "{}")
     except Exception:
         blob = {}
-    years = _years_map_of(blob)
     meta = _meta_of(blob)
-    return bool(row.prorated), years, meta
+    # allow explicit boolean column too
+    if hasattr(row, "prorated"):
+        meta["prorated"] = bool(getattr(row, "prorated"))
+    return bool(meta["prorated"]), years, meta
 
-def _used_days_total(session, emp_id: int, leave_type: str, year: int) -> float:
-    if _table_exists(session, "leave_applications"):
-        v = _safe_scalar(session, """
-            SELECT COALESCE(SUM(used_days),0) FROM leave_applications
-            WHERE employee_id=:e AND leave_type=:t AND strftime('%Y', start_date)=:y
-              AND COALESCE(status,'Approved')='Approved'
-        """, {"e": emp_id, "t": leave_type, "y": str(year)}, 0.0)
+
+# ----------------------------
+# Used-days queries
+# ----------------------------
+
+def _used_days_total_year(session, emp_id: int, leave_type: str, year: int, up_to: Optional[date] = None) -> float:
+    if not _table_exists(session, "leave_applications"):
+        return 0.0
+    params = {"e": emp_id, "t": leave_type, "y": str(year)}
+    extra = ""
+    if up_to:
+        params["end"] = up_to.isoformat()
+        extra = " AND date(start_date) <= :end "
+    v = _safe_scalar(session, f"""
+        SELECT COALESCE(SUM(used_days),0)
+        FROM leave_applications
+        WHERE employee_id=:e AND leave_type=:t
+          AND strftime('%Y', start_date)=:y
+          AND COALESCE(status,'Approved')='Approved'
+          {extra}
+    """, params, 0.0)
+    try:
+        return float(v or 0.0)
+    except Exception:
+        return 0.0
+
+def _used_days_by_year_upto(session, emp_id: int, leave_type: str, up_to: date) -> Dict[int, float]:
+    if not _table_exists(session, "leave_applications"):
+        return {}
+    rows = _safe_rows(session, """
+        SELECT CAST(strftime('%Y', start_date) AS INT) as y, COALESCE(SUM(used_days),0)
+        FROM leave_applications
+        WHERE employee_id=:e AND leave_type=:t
+          AND COALESCE(status,'Approved')='Approved'
+          AND date(start_date) <= :end
+        GROUP BY y
+    """, {"e": emp_id, "t": leave_type, "end": up_to.isoformat()})
+    out: Dict[int, float] = {}
+    for y, s in rows:
         try:
-            return float(v or 0.0)
+            out[int(y)] = float(s or 0.0)
         except Exception:
-            return 0.0
-    return 0.0
+            continue
+    return out
 
-def _compute_entitlement_this_year(session, emp: Employee, leave_type: str, today: date) -> float:
+
+# ----------------------------
+# Entitlement calculators (match your 6 cases)
+# ----------------------------
+
+def _entitlement_asof(session, emp: Employee, leave_type: str, today: date) -> Tuple[float, str, bool, float]:
+    """
+    Returns (entitlement_as_of_today, carry_policy, limit_enabled, limit_value).
+    Implements:
+      1) prorated & bring-unlimited     -> cumulative monthly accrual
+      2) non-prorated & bring-unlimited -> sum of full years up to current service year
+      3) prorated & reset               -> months in current service-year * A_current/12
+      4) non-prorated & reset           -> A_current
+      5) prorated & bring-limit         -> monthly accrual with year-end cap and prior-year used deducted before capping
+      6) non-prorated & bring-limit     -> add A at each anniversary; at each Dec 31 cap after subtracting year's used
+    """
     prorated, years, meta = _fetch_leave_defaults(session, leave_type)
-    carry_policy = str(meta.get("carry_policy", "reset")).lower()  # "reset" | "bring"
+    carry_policy = meta.get("carry_policy", "reset")
     limit_enabled = bool(meta.get("carry_limit_enabled", False))
     limit_val = float(meta.get("carry_limit", 0.0))
 
-    join = emp.join_date or _MIN_DATE
-    if not join or join <= _MIN_DATE:
-        return 0.0
+    join = _emp_join_date(emp)
+    if not join or join <= _MIN_DATE or today < join:
+        return 0.0, carry_policy, limit_enabled, limit_val
 
-    dec31_prev = date(today.year - 1, 12, 31)
+    yidx_today = _service_year_idx(join, today)
+    A_today = _allow_for_year(years, yidx_today)
+
+    # ---- RESET policy ----
+    if carry_policy == "reset":
+        if prorated:
+            # Case 3: months since last anniversary * A_current / 12
+            months_into_service_year = _months_since(join, today) % 12
+            return (months_into_service_year / 12.0) * A_today, carry_policy, limit_enabled, limit_val
+        else:
+            # Case 4: full entitlement of current service year
+            return A_today, carry_policy, limit_enabled, limit_val
+
+    # ---- BRING (unlimited) ----
+    if carry_policy == "bring" and not limit_enabled:
+        if prorated:
+            # Case 1: cumulative monthly accrual since join
+            total_m = _months_since(join, today)
+            acc = 0.0
+            for m in range(total_m):
+                yidx = m // 12 + 1
+                acc += _allow_for_year(years, yidx) / 12.0
+            return acc, carry_policy, False, 0.0
+        else:
+            # Case 2: sum of full years up to current service year
+            s = 0.0
+            for i in range(1, yidx_today + 1):
+                s += _allow_for_year(years, i)
+            return s, carry_policy, False, 0.0
+
+    # ---- BRING with LIMIT ----
+    used_by_year = _used_days_by_year_upto(session, emp.id, leave_type, today)
+
     if prorated:
-        ent_prior = _accrual_prorated(join, dec31_prev, years) if today.year > join.year else 0.0
-        ent_curr = _current_year_prorated(join, today, years)
+        # Case 5: monthly accrual with year-end cap, subtract used of that year before capping
+        total_m = _months_since(join, today)
+        bal = 0.0
+        for m in range(total_m):
+            when = _add_months(join, m)  # first day of that month
+            yidx = m // 12 + 1
+            bal += _allow_for_year(years, yidx) / 12.0
+            # apply prior-year cap at Dec of past years
+            if when.month == 12 and when.year < today.year:
+                used_y = float(used_by_year.get(when.year, 0.0))
+                bal = max(0.0, bal - used_y)
+                bal = min(bal, limit_val)
+        # current year: do not cap yet; leave current-year used to be shown in "Used"
+        return bal, carry_policy, True, limit_val
     else:
-        ent_prior = _accrual_nonprorated(join, dec31_prev, years) if today.year > join.year else 0.0
-        ent_curr = _allow_for_year(years, _service_year_idx(join, today))
+        # Case 6: add A at each anniversary; cap at each Dec 31 after subtracting that year's used
+        bal = 0.0
+        # anniversaries that have occurred up to today (include join day as year1)
+        anniv_count = _months_since(join, today) // 12 + 1
+        # process year-by-year boundaries
+        # Build event list: (date, kind, value)
+        events: List[Tuple[date, str, float]] = []
+        # anniversaries
+        for i in range(1, anniv_count + 1):
+            d = _add_months(join, (i - 1) * 12)
+            if d <= today:
+                events.append((d, "anniv", _allow_for_year(years, i)))
+        # year-ends before current year
+        y = join.year
+        while y < today.year:
+            events.append((date(y, 12, 31), "year_end", 0.0))
+            y += 1
+        # sort events chronologically
+        events.sort(key=lambda x: x[0])
+        for d, kind, val in events:
+            if kind == "anniv":
+                bal += float(val)
+            elif kind == "year_end":
+                used_y = float(used_by_year.get(d.year, 0.0))
+                bal = max(0.0, bal - used_y)
+                if limit_enabled:
+                    bal = min(bal, limit_val)
+        return bal, carry_policy, True, limit_val
 
-    if carry_policy == "bring":
-        used_prior = _used_days_total(session, emp.id, leave_type, dec31_prev.year)
-        leftover_prev = max(0.0, ent_prior - used_prior)
-        carried = min(leftover_prev, limit_val) if limit_enabled else leftover_prev
-        return max(0.0, carried + ent_curr)
-    else:
-        return max(0.0, ent_curr)
 
-# --------------------------------------
-# Business rules: used-days calculator
-# --------------------------------------
+# ----------------------------
+# Business rules: used-days calculator for application form
+# ----------------------------
 
 def _default_workdays() -> Set[int]:
     return {0, 1, 2, 3, 4}
@@ -172,13 +324,13 @@ def _employee_workdays(session, emp_id: int) -> Set[int]:
     rows = session.query(WorkScheduleDay).filter(WorkScheduleDay.employee_id == emp_id).all()
     if not rows:
         return _default_workdays()
-    days = {r.weekday for r in rows if bool(r.working)}
+    days = {int(getattr(r, "weekday")) for r in rows if bool(getattr(r, "working", True))}
     return days or _default_workdays()
 
 def _holidays_between(session, emp: Employee, d0: date, d1: date) -> Dict[date, float]:
     if not emp:
         return {}
-    group = emp.holiday_group or ""
+    group = getattr(emp, "holiday_group", "") or ""
     if not group:
         return {}
     q = session.query(Holiday).filter(
@@ -188,7 +340,7 @@ def _holidays_between(session, emp: Employee, d0: date, d1: date) -> Dict[date, 
     )
     out: Dict[date, float] = {}
     for h in q.all():
-        out[h.date] = 1.0  # extend later if half-day holidays are added
+        out[h.date] = 1.0  # extend to 0.5 if you add half-day holidays later
     return out
 
 def _daterange(d0: date, d1: date):
@@ -218,6 +370,7 @@ def _compute_used_days(
         w = hols.get(d, 0.0)
         return 1.0 if w >= 1.0 else 0.0
 
+    # same-day
     if s_date == e_date:
         if not is_workday(s_date):
             return 0.0
@@ -235,6 +388,7 @@ def _compute_used_days(
             return max(0.0, gross - min(red, gross))
         return 0.0
 
+    # multi-day
     total = 0.0
     for d in _daterange(s_date, e_date):
         if not is_workday(d):
@@ -253,9 +407,10 @@ def _compute_used_days(
             total += max(0.0, day_take - min(red, day_take))
     return round(total, 2)
 
-# --------------------------------------
+
+# ----------------------------
 # Optional leave tables (names assumed)
-# --------------------------------------
+# ----------------------------
 
 def _ensure_leave_tables(session):
     return
@@ -273,9 +428,10 @@ def _fetch_leave_types(session) -> List[str]:
     except Exception:
         return []
 
-# --------------------------------------
+
+# ----------------------------
 # leave applications / adjustments I/O
-# --------------------------------------
+# ----------------------------
 
 def _insert_application(session,
                         emp_id: int,
@@ -365,6 +521,7 @@ def _list_adjustments(session, limit: int = 200) -> List[Tuple]:
         ORDER BY la.date DESC, la.rowid DESC
         LIMIT {int(limit)}
     """, {"acc": tenant_id()})
+
 
 # ----------------------------
 # UI
@@ -547,13 +704,20 @@ class LeaveModuleWidget(QWidget):
             emps = s.query(Employee).filter(Employee.account_id == tenant_id()).order_by(Employee.full_name).all()
             self.sum_tbl.setRowCount(0)
             for e in emps:
-                entitlement = _compute_entitlement_this_year(s, e, ltype, today)
-                used_ytd = _used_days_total(s, e.id, ltype, yr)
-                balance = max(0.0, entitlement - used_ytd)
+                entitlement, carry_policy, limit_enabled, _limit = _entitlement_asof(s, e, ltype, today)
+
+                # Used column:
+                # - reset: show used in selected year
+                # - bring (unlimited/limit): current-year used shown; prior years already accounted in entitlement via carry/limits
+                used_show = _used_days_total_year(s, e.id, ltype, yr, up_to=today)
+
+                # Balance column:
+                balance = max(0.0, entitlement - (used_show if yr == today.year else 0.0))
+                # if viewing a past year, keep balance=entitlement (snapshot uses today's entitlement; typical use is current year)
 
                 r = self.sum_tbl.rowCount()
                 self.sum_tbl.insertRow(r)
-                row_vals = [e.code or "", e.full_name or "", f"{entitlement:.2f}", f"{used_ytd:.2f}", f"{balance:.2f}"]
+                row_vals = [e.code or "", e.full_name or "", f"{entitlement:.2f}", f"{used_show:.2f}", f"{balance:.2f}"]
                 for c, val in enumerate(row_vals):
                     it = QTableWidgetItem(val)
                     if c >= 2:
@@ -648,11 +812,11 @@ class LeaveModuleWidget(QWidget):
         yr = s_dt.year
 
         with SessionLocal() as s:
-            used = _compute_used_days(s, emp_id, s_dt, s_half, e_dt, e_half)
+            used = _compute_used_days(s, int(emp_id), s_dt, s_half, e_dt, e_half)
             emp = s.get(Employee, int(emp_id))
-            entitlement = _compute_entitlement_this_year(s, emp, ltype, date.today()) if emp else 0.0
-            used_ytd = _used_days_total(s, int(emp_id), ltype, yr)
-            balance = max(0.0, entitlement - used_ytd)
+            entitlement, carry_policy, limit_enabled, _limit = _entitlement_asof(s, emp, ltype, date.today()) if emp else (0.0, "reset", False, 0.0)
+            used_show = _used_days_total_year(s, int(emp_id), ltype, yr, up_to=date.today())
+            balance = max(0.0, entitlement - used_show)
 
         self.lbl_used.setText(f"Total Used: {used:.2f}")
         self.lbl_balance.setText(f"Balance: {balance:.2f}")
@@ -808,6 +972,7 @@ class LeaveModuleWidget(QWidget):
         self._populate_summary()
         self._recalculate_used()
         self._reload_adjustments()
+
 
 # local util for safe JSON
 def json_load(s: str):
