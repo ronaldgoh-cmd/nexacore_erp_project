@@ -1,5 +1,5 @@
 from datetime import date
-from sqlalchemy import String, Integer, Float, Date, Boolean, ForeignKey, UniqueConstraint, Text
+from sqlalchemy import String, Integer, Float, Date, Boolean, ForeignKey, UniqueConstraint, Text, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from ...core.database import Base
 from ...core.tenant import id as tenant_id
@@ -52,6 +52,12 @@ class Employee(Base):
     work_schedule: Mapped[list["WorkScheduleDay"]] = relationship(back_populates="employee", cascade="all, delete-orphan")
     entitlements: Mapped[list["LeaveEntitlement"]] = relationship(back_populates="employee", cascade="all, delete-orphan")
 
+    __table_args__ = (
+        Index("ix_emp_account_code", "account_id", "code"),
+        Index("ix_emp_account_fullname", "account_id", "full_name"),
+    )
+
+
 class SalaryHistory(Base):
     __tablename__ = "employee_salary_history"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -61,6 +67,7 @@ class SalaryHistory(Base):
     start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     employee: Mapped[Employee] = relationship(back_populates="salary_history")
+
 
 class WorkScheduleDay(Base):
     __tablename__ = "employee_work_schedule"
@@ -73,6 +80,7 @@ class WorkScheduleDay(Base):
     __table_args__ = (UniqueConstraint("employee_id", "weekday", name="uq_emp_weekday"),)
     employee: Mapped[Employee] = relationship(back_populates="work_schedule")
 
+
 class LeaveEntitlement(Base):
     __tablename__ = "employee_leave_entitlements"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -84,6 +92,7 @@ class LeaveEntitlement(Base):
     __table_args__ = (UniqueConstraint("employee_id", "year_of_service", "leave_type", name="uq_emp_yos_type"),)
     employee: Mapped[Employee] = relationship(back_populates="entitlements")
 
+
 # -------- Holidays and Options / Defaults --------
 class Holiday(Base):
     __tablename__ = "holidays"
@@ -94,12 +103,14 @@ class Holiday(Base):
     date: Mapped[date] = mapped_column(Date, index=True)
     __table_args__ = (UniqueConstraint("account_id", "group_code", "date", name="uq_holiday"),)
 
+
 class DropdownOption(Base):
     __tablename__ = "dropdown_options"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     account_id: Mapped[str] = mapped_column(String, index=True, default="default")
     category: Mapped[str] = mapped_column(String, index=True)  # e.g. "ID Type", "Position", "Bank", "Country", "Race"
     value: Mapped[str] = mapped_column(String, index=True)
+
 
 class LeaveDefault(Base):
     __tablename__ = "leave_defaults"
@@ -108,4 +119,4 @@ class LeaveDefault(Base):
     leave_type: Mapped[str] = mapped_column(String, index=True)   # "Annual", "Sick", etc.
     prorated: Mapped[bool] = mapped_column(Boolean, default=False)
     yearly_reset: Mapped[bool] = mapped_column(Boolean, default=True)
-    table_json: Mapped[str] = mapped_column(Text, default="{}")   # {"1":14,...,"50":14}
+    table_json: Mapped[str] = mapped_column(Text, default="{}")   # {"years": {"1":14,...}, "_meta": {...}}

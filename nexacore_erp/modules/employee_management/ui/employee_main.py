@@ -2,8 +2,9 @@ from datetime import datetime, date
 import re
 import json
 import os
+import unicodedata
 
-from PySide6.QtCore import Qt, QDate, QObject, QEvent
+from PySide6.QtCore import Qt, QDate, QObject, QEvent, QDateTime
 from PySide6.QtWidgets import (
     QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QLineEdit, QComboBox, QFormLayout, QDateEdit, QFileDialog,
@@ -12,31 +13,43 @@ from PySide6.QtWidgets import (
     QInputDialog, QApplication, QDateTimeEdit
 )
 from PySide6.QtWidgets import QDoubleSpinBox
-from PySide6.QtWidgets import QDateEdit, QDateTimeEdit
-from PySide6.QtCore import QDate, QDateTime
 
 # ---- shared date helpers ----
 MIN_DATE = date(1900, 1, 1)
 def _fmt_date(d: date | None) -> str:
     return "" if (not d or d <= MIN_DATE) else d.strftime("%Y-%m-%d")
 
+def _clean_text(s: str) -> str:
+    """
+    Normalise weird spaces and smart quotes *without* losing characters.
+    Helps avoid "??" or unexpected glyphs on import.
+    """
+    if not isinstance(s, str):
+        return ""
+    s = unicodedata.normalize("NFKC", s)
+    # replace common smart quotes with ASCII
+    s = (s.replace("\u2018", "'").replace("\u2019", "'")
+           .replace("\u201c", '"').replace("\u201d", '"')
+           .replace("\u00a0", " "))
+    # strip zero-width
+    s = re.sub(r"[\u200B-\u200D\uFEFF]", "", s)
+    return s.strip()
+
 
 class BlankableDateEdit(QDateEdit):
     """Truly blank until a real date is set."""
     def __init__(self, display_fmt: str = "yyyy-MM-dd", *a, **kw):
-        # set flags before base __init__ because Qt may call textFromDateTime during init
         self._fmt = display_fmt
         self._blank = True
         super().__init__(*a, **kw)
 
         self.setCalendarPopup(True)
         self.setMinimumDate(QDate(1900, 1, 1))
-        self.setSpecialValueText(" ")  # single space renders visually empty
+        self.setSpecialValueText(" ")
         super().setDate(self.minimumDate())
         self.setDisplayFormat(self._fmt)
         self.dateChanged.connect(self._unblank_on_change)
 
-    # Qt calls this while painting; keep empty when blank
     def textFromDateTime(self, dt: QDateTime):  # type: ignore[override]
         if getattr(self, "_blank", True):
             return ""
@@ -82,22 +95,18 @@ from ..models import (
     WorkScheduleDay, LeaveEntitlement
 )
 
-# block wheel changes on all combo boxes
+# ---- block wheel changes on all combo boxes (when popup closed) ----
 class _NoWheelFilter(QObject):
     def eventFilter(self, obj, ev):
         if isinstance(obj, QComboBox):
-            # ignore mouse wheel when popup is closed
             if ev.type() == QEvent.Wheel and not obj.view().isVisible():
                 return True
-            # optional: block PgUp/PgDn from changing selection when closed
             if ev.type() == QEvent.KeyPress and not obj.view().isVisible():
                 if ev.key() in (Qt.Key_PageUp, Qt.Key_PageDown):
                     return True
         return False
 
 _NO_WHEEL_FILTER = _NoWheelFilter()
-
-# in __init__ (you already have this)
 app = QApplication.instance()
 if app is not None:
     app.installEventFilter(_NO_WHEEL_FILTER)
@@ -155,11 +164,10 @@ class EmployeeMainWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.setObjectName("EmployeeMainWidget")
-        # load persisted code format into globals
         global EMP_CODE_PREFIX, EMP_CODE_ZPAD
         EMP_CODE_PREFIX, EMP_CODE_ZPAD = _load_code_settings()
 
-        # install global no-wheel filter
+        # (defensive) install global no-wheel filter
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(_NO_WHEEL_FILTER)
@@ -246,13 +254,13 @@ class EmployeeMainWidget(QWidget):
         self.emp_table.setHorizontalHeaderLabels([c[1] for c in COLS])
         self.emp_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.emp_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.emp_table.setSortingEnabled(False)  # keep stable order
+        self.emp_table.setSortingEnabled(False)
         self.emp_table.itemSelectionChanged.connect(self._show_preview)
         hdr = self.emp_table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
         hdr.setStretchLastSection(False)
-        hdr.setSortIndicatorShown(False)  # hide sort arrow
-        hdr.setSectionsClickable(False)  # disable click-to-sort
+        hdr.setSortIndicatorShown(False)
+        hdr.setSectionsClickable(False)
         lv.addWidget(self.emp_table, 1)
 
         # right: detail
@@ -336,7 +344,7 @@ class EmployeeMainWidget(QWidget):
 
         rows = [e for e in getattr(self, "_all_rows", []) if keep(e)]
 
-        self.emp_table.setSortingEnabled(False)  # hard-disable resort
+        self.emp_table.setSortingEnabled(False)
         self.emp_table.setRowCount(len(rows))
         for r, e in enumerate(rows):
             def put(col, val):
@@ -369,7 +377,6 @@ class EmployeeMainWidget(QWidget):
 
             self.emp_table.setVerticalHeaderItem(r, QTableWidgetItem(str(e.id)))
 
-        # do not re-enable sorting
         if self.emp_table.rowCount() > 0:
             self.emp_table.selectRow(0)
         else:
@@ -557,7 +564,9 @@ class EmployeeMainWidget(QWidget):
         self.h_table.resizeColumnsToContents()
 
     def _holiday_add(self):
-        g = self.h_group.text().strip(); n = self.h_name.text().strip(); d = self.h_date.text().strip()
+        g = _clean_text(self.h_group.text())
+        n = _clean_text(self.h_name.text())
+        d = _clean_text(self.h_date.text())
         if not (g and n and d):
             QMessageBox.warning(self, "Holiday", "Fill group, name, date (DD-MM-YYYY)"); return
         try:
@@ -586,14 +595,12 @@ class EmployeeMainWidget(QWidget):
         self._holiday_reload()
 
     def _holiday_import_csv(self):
-        import csv, io, re, unicodedata
-        from datetime import datetime, timedelta
+        import csv, io
 
         path, _ = QFileDialog.getOpenFileName(self, "Import Holidays CSV", "", "CSV Files (*.csv)")
         if not path:
             return
 
-        # --- load bytes once, then try decodes ---
         raw = open(path, "rb").read()
 
         def _try_decode(b: bytes, enc: str):
@@ -610,33 +617,31 @@ class EmployeeMainWidget(QWidget):
                 text, used_enc = s, enc
                 break
         if text is None:
-            # last resort with replacement
             text, used_enc = raw.decode("latin-1", "replace"), "latin-1(replace)"
 
-        # fix common junk: non-breaking spaces, smart quotes
+        # normalise once here
+        text = unicodedata.normalize("NFKC", text)
         text = (text.replace("\u00a0", " ")
-                .replace("\u2018", "'").replace("\u2019", "'")
-                .replace("\u201c", '"').replace("\u201d", '"'))
+                    .replace("\u2018", "'").replace("\u2019", "'")
+                    .replace("\u201c", '"').replace("\u201d", '"'))
+        text = re.sub(r"[\u200B-\u200D\uFEFF]", "", text)
 
-        # --- sniff delimiter safely ---
+        # sniff delimiter
         try:
             sample = text[:4096]
             dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
             delim = dialect.delimiter
         except Exception:
-            delim = ","  # default
+            delim = ","
 
-        # --- header normalizer ---
+        # header normaliser
         def norm_key(k: str) -> str:
             k = unicodedata.normalize("NFKC", k or "").strip().lower()
             k = re.sub(r"\s+", " ", k)
             k = k.replace("group code", "group")
-            # collapse non-alnum
             k = re.sub(r"[^a-z0-9]+", "", k)
             return k
 
-        # accepted header keys after normalization
-        # map to our logical fields
         key_map = {
             "group": "group",
             "groupcode": "group",
@@ -647,23 +652,19 @@ class EmployeeMainWidget(QWidget):
             "date": "date",
             "holidaydate": "date",
             "dt": "date",
-            # optional extras (ignored if present)
             "ishalfday": "is_half_day",
             "description": "description",
             "desc": "description",
         }
 
-        # --- parse to rows ---
         rd = csv.reader(io.StringIO(text), delimiter=delim)
         try:
             raw_headers = next(rd)
         except StopIteration:
             QMessageBox.warning(self, "Holidays", "Empty CSV.")
             return
-
         headers = [key_map.get(norm_key(h), norm_key(h)) for h in raw_headers]
 
-        # indices for fields we care about
         def idx_of(field):
             try:
                 return headers.index(field)
@@ -683,9 +684,8 @@ class EmployeeMainWidget(QWidget):
             return
 
         def parse_date(s: str):
-            from datetime import datetime, timedelta
-            import re
-            s = (s or "").strip()
+            from datetime import timedelta
+            s = _clean_text(s)
             if not s:
                 return None
 
@@ -696,19 +696,14 @@ class EmployeeMainWidget(QWidget):
                 except Exception:
                     pass
 
-            # clean common punctuation
             s = s.replace(",", "").replace(".", "")
             s = re.sub(r"\s+", " ", s)
 
             fmts = (
-                # ISO
                 "%Y-%m-%d",
-                # D-M-Y numeric
                 "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y",
                 "%d-%m-%y", "%d/%m/%y", "%m/%d/%y",
-                # D-Mon-Y (abbr/full) with 4y
                 "%d-%b-%Y", "%d %b %Y", "%d-%B-%Y", "%d %B %Y",
-                # D-Mon-Y (abbr/full) with 2y
                 "%d-%b-%y", "%d %b %y", "%d-%B-%y", "%d %B %y",
             )
             for fmt in fmts:
@@ -723,13 +718,12 @@ class EmployeeMainWidget(QWidget):
 
         with SessionLocal() as s:
             for row in rd:
-                # pad short rows
                 if len(row) < len(headers):
                     row += [""] * (len(headers) - len(row))
 
-                g = (row[i_g] if i_g >= 0 else "").strip()
-                n = (row[i_n] if i_n >= 0 else "").strip()
-                d = (row[i_d] if i_d >= 0 else "").strip()
+                g = _clean_text(row[i_g] if i_g >= 0 else "")
+                n = _clean_text(row[i_n] if i_n >= 0 else "")
+                d = _clean_text(row[i_d] if i_d >= 0 else "")
 
                 if not g or not n or not d:
                     skipped += 1
@@ -768,7 +762,9 @@ class EmployeeMainWidget(QWidget):
         if not path: return
         import csv
         with open(path, "w", newline="", encoding="utf-8") as f:
-            wr = csv.writer(f); wr.writerow(["group", "name", "date"]); wr.writerow(["A", "New Year", "01-01-2025"])
+            wr = csv.writer(f)
+            wr.writerow(["group", "name", "date"])
+            wr.writerow(["A", "New Year's Day", "01-01-2025"])
         QMessageBox.information(self, "Template", "Template saved.")
 
     # ---------------- Settings ----------------
@@ -838,13 +834,12 @@ class EmployeeMainWidget(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, "Export Employees", "employees.xlsx", "Excel (*.xlsx)")
         if not path: return
 
-        # collect dropdowns and employees
         with SessionLocal() as s:
             drop = {}
-            for r in s.query(DropdownOption).all():
+            for r in s.query(DropdownOption).filter(DropdownOption.account_id == tenant_id()).all():
                 drop.setdefault(r.category, []).append(r.value)
             emps = s.query(Employee).filter(Employee.account_id == tenant_id()).all()
-            groups = [g[0] for g in s.query(Holiday.group_code).distinct().all()]
+            groups = [g[0] for g in s.query(Holiday.group_code).filter(Holiday.account_id == tenant_id()).distinct().all()]
         drop.setdefault("Holiday Group", groups)
         drop.setdefault("Employment Status", ["Active", "Non-Active"])
 
@@ -858,7 +853,7 @@ class EmployeeMainWidget(QWidget):
         for cat, vals in sorted(drop.items()):
             ws2.cell(drow, 1, cat)
             for i, v in enumerate(sorted(vals), start=2):
-                ws2.cell(drow, i, v)
+                ws2.cell(drow, i, _clean_text(v))
             drow += 1
 
         headers = [
@@ -932,11 +927,12 @@ class EmployeeMainWidget(QWidget):
             QMessageBox.warning(self, "Import", f"Cannot open workbook: {ex}")
             return
 
-        # --- header normalization to kill NBSP/zero-width and case differences ---
         def _norm_header(s: str) -> str:
             if not isinstance(s, str):
                 return ""
-            return re.sub(r"[\u00A0\u200B-\u200D\uFEFF]", "", s).strip().lower()
+            s = unicodedata.normalize("NFKC", s)
+            s = re.sub(r"[\u00A0\u200B-\u200D\uFEFF]", "", s)
+            return s.strip().lower()
 
         headers: dict[str, int] = {}
         for c in range(1, ws.max_column + 1):
@@ -949,7 +945,6 @@ class EmployeeMainWidget(QWidget):
             QMessageBox.warning(self, "Import", "Sheet needs 'Full Name' or 'Employee Code'.")
             return
 
-        # get value by any of several names
         def gv(row, *names):
             for name in names:
                 c = headers.get(_norm_header(name))
@@ -958,30 +953,23 @@ class EmployeeMainWidget(QWidget):
             return None
 
         def to_date(x):
-            # Accept ISO, Singapore-style, Excel serials (number or numeric string). Blank-like tokens -> None.
             BLANKS = {None, "", "-", "--", "—", "N/A", "NA"}
             if x in BLANKS:
                 return None
-
-            # Excel datetime/date objects
             if isinstance(x, datetime):
                 d = x.date()
                 return None if d <= MIN_DATE else d
             if isinstance(x, date):
                 return None if x <= MIN_DATE else x
-
-            # Excel serials (numbers)
             if isinstance(x, (int, float)):
                 try:
                     from openpyxl.utils.datetime import from_excel, CALENDAR_WINDOWS_1900 as CAL
                     d = from_excel(x, CAL).date()
                     return None if d <= MIN_DATE else d
                 except Exception:
-                    pass  # fall through
-
-            # Strings in common formats or numeric serials
+                    pass
             if isinstance(x, str):
-                s = x.strip()
+                s = _clean_text(x)
                 if re.fullmatch(r"\d{1,6}", s):
                     try:
                         from openpyxl.utils.datetime import from_excel, CALENDAR_WINDOWS_1900 as CAL
@@ -996,7 +984,6 @@ class EmployeeMainWidget(QWidget):
                     except Exception:
                         continue
                 return None
-
             return None
 
         def to_float(x):
@@ -1007,8 +994,7 @@ class EmployeeMainWidget(QWidget):
 
         def to_str(x):
             s = "" if x is None else str(x)
-            # remove NBSP and zero-width, trim
-            s = re.sub(r"[\u00A0\u200B-\u200D\uFEFF]", "", s).strip()
+            s = _clean_text(s)
             return "" if s in ("-", "--") else s
 
         created = updated = 0
@@ -1145,10 +1131,13 @@ class EmployeeMainWidget(QWidget):
 
         with SessionLocal() as s:
             dropdowns = {c: [r.value for r in s.query(DropdownOption)
-                             .filter(DropdownOption.category == c)
+                             .filter(DropdownOption.account_id == tenant_id(),
+                                     DropdownOption.category == c)
                              .order_by(DropdownOption.value).all()]
                          for c in MANAGED_CATEGORIES}
-            groups = [g[0] for g in s.query(Holiday.group_code).distinct().all()]
+            groups = [g[0] for g in s.query(Holiday.group_code)
+                      .filter(Holiday.account_id == tenant_id())
+                      .distinct().all()]
         dropdowns["Employment Status"] = ["Active", "Non-Active"]
         dropdowns["Holiday Group"] = groups
 
@@ -1159,7 +1148,7 @@ class EmployeeMainWidget(QWidget):
             list_col_map[cat] = col_idx
             lists.cell(row=1, column=col_idx, value=cat)
             for i, v in enumerate(vals, start=2):
-                lists.cell(row=i, column=col_idx, value=v)
+                lists.cell(row=i, column=col_idx, value=_clean_text(v))
             col_idx += 1
 
         from openpyxl.utils import get_column_letter as _gcl
@@ -1246,13 +1235,18 @@ class EmployeeMainWidget(QWidget):
         out: dict[str, list[str]] = {}
         with SessionLocal() as s:
             for cat in MANAGED_CATEGORIES:
-                vals = [r.value for r in s.query(DropdownOption).filter(DropdownOption.category == cat).order_by(DropdownOption.value).all()]
+                vals = [r.value for r in s.query(DropdownOption)
+                        .filter(DropdownOption.account_id == tenant_id(),
+                                DropdownOption.category == cat)
+                        .order_by(DropdownOption.value).all()]
                 out[cat] = vals or [""]
         return out
 
     def _next_employee_code(self, s) -> str:
         prefix, z = EMP_CODE_PREFIX, EMP_CODE_ZPAD
-        existing = [r.code for r in s.query(Employee).filter(Employee.account_id == tenant_id()).all() if r.code and r.code.startswith(prefix)]
+        existing = [r.code for r in s.query(Employee)
+                    .filter(Employee.account_id == tenant_id()).all()
+                    if r.code and r.code.startswith(prefix)]
         nums = []
         for c in existing:
             m = re.search(r"(\d+)$", c)
@@ -1291,7 +1285,7 @@ class EmployeeEditor(QDialog):
         if self._emp_id:
             self._load(self._emp_id)
         else:
-            # Add mode: force all date edits to blank and auto-load default leave
+            # Add mode: force blank dates and auto-load default leave
             for w in (self.dob, self.pr_date, self.join_date, self.exit_date):
                 w.clear()
             self._set_all_fields_blank()
@@ -1310,9 +1304,8 @@ class EmployeeEditor(QDialog):
 
         for name in (
                 "full_name", "email", "contact", "address", "id_number",
-                "work_permit_number", "bank_account", "bank_name",
-                "basic_salary", "commission", "incentives", "allowance",
-                "overtime_rate", "part_time_rate", "levy"
+                "work_permit_number", "bank_account",
+                "incentives", "allowance", "ot_rate", "pt_rate", "levy"
         ):
             w = getattr(self, name, None)
             if isinstance(w, QLineEdit):
@@ -1343,12 +1336,17 @@ class EmployeeEditor(QDialog):
 
     def _opts(self, category: str) -> list[str]:
         with SessionLocal() as s:
-            rows = s.query(DropdownOption).filter(DropdownOption.category == category).order_by(DropdownOption.value).all()
+            rows = s.query(DropdownOption)\
+                    .filter(DropdownOption.account_id == tenant_id(),
+                            DropdownOption.category == category)\
+                    .order_by(DropdownOption.value).all()
         return [r.value for r in rows]
 
     def _holiday_groups(self) -> list[str]:
         with SessionLocal() as s:
-            rows = s.query(Holiday.group_code).distinct().all()
+            rows = s.query(Holiday.group_code)\
+                    .filter(Holiday.account_id == tenant_id())\
+                    .distinct().all()
         return [r[0] for r in rows]
 
     # --- Personal ---
@@ -1362,7 +1360,7 @@ class EmployeeEditor(QDialog):
         self.id_number = QLineEdit()
         self.gender = QComboBox(); self.gender.addItems(self._opts("Gender") or ["Male", "Female"])
 
-        # use blankable dates
+        # blankable dates
         self.dob = BlankableDateEdit()
         self.dob.dateChanged.connect(self._update_age)
 
@@ -1642,18 +1640,28 @@ class EmployeeEditor(QDialog):
                     self.ent_tbl.setItem(r, c, QTableWidgetItem(str(val)))
 
     def _load_leave_types(self) -> list[str]:
+        # combine types from LeaveDefault AND existing per-employee entitlements (tenant-scoped), de-duped case-insensitively
+        out = []
+        seen = set()
         with SessionLocal() as s:
-            rows = s.query(LeaveDefault.leave_type).distinct().all()
-        return [r[0] for r in rows]
+            for (t,) in s.query(LeaveDefault.leave_type).filter(LeaveDefault.account_id == tenant_id()).distinct().all():
+                k = (t or "").strip().casefold()
+                if k and k not in seen:
+                    seen.add(k); out.append(t)
+            for (t,) in s.query(LeaveEntitlement.leave_type).filter(LeaveEntitlement.account_id == tenant_id()).distinct().all():
+                k = (t or "").strip().casefold()
+                if k and k not in seen:
+                    seen.add(k); out.append(t)
+        return out or ["Annual Leave"]
 
     def _load_defaults_into_entitlements(self):
         with SessionLocal() as s:
-            raw = {d.leave_type: json.loads(d.table_json or "{}") for d in s.query(LeaveDefault).all()}
+            rows = s.query(LeaveDefault).filter(LeaveDefault.account_id == tenant_id()).all()
+            raw = {d.leave_type: json.loads(d.table_json or "{}") for d in rows}
         if not raw:
             QMessageBox.information(self, "Leave Defaults", "No defaults defined.")
             return
 
-        # Accept both new {"years": {...}, "_meta": {...}} and old plain dict
         years_map: dict[str, dict[str, int]] = {}
         for lt, blob in raw.items():
             if isinstance(blob, dict) and "years" in blob and isinstance(blob["years"], dict):
@@ -1713,7 +1721,10 @@ class DropdownOptionsDialog(QDialog):
     def _reload_values(self, category: str):
         self.val_list.clear()
         with SessionLocal() as s:
-            rows = s.query(DropdownOption).filter(DropdownOption.category == category).order_by(DropdownOption.value).all()
+            rows = s.query(DropdownOption)\
+                    .filter(DropdownOption.account_id == tenant_id(),
+                            DropdownOption.category == category)\
+                    .order_by(DropdownOption.value).all()
         for r in rows:
             QListWidgetItem(r.value, self.val_list)
 
@@ -1721,8 +1732,13 @@ class DropdownOptionsDialog(QDialog):
         cat = self.cat.currentText()
         txt, ok = self._prompt("Add value", "Value")
         if not ok or not txt.strip(): return
+        txt = _clean_text(txt)
         with SessionLocal() as s:
-            exists = s.query(DropdownOption).filter(DropdownOption.category == cat, DropdownOption.value == txt.strip()).first()
+            exists = s.query(DropdownOption).filter(
+                DropdownOption.account_id == tenant_id(),
+                DropdownOption.category == cat,
+                DropdownOption.value == txt.strip()
+            ).first()
             if exists:
                 QMessageBox.information(self, "Dropdown", "Value already exists."); return
             s.add(DropdownOption(account_id=tenant_id(), category=cat, value=txt.strip()))
@@ -1736,10 +1752,19 @@ class DropdownOptionsDialog(QDialog):
         old = it.text()
         new, ok = self._prompt("Rename value", "New value", old)
         if not ok or not new.strip() or new.strip() == old: return
+        new = _clean_text(new)
         with SessionLocal() as s:
-            row = s.query(DropdownOption).filter(DropdownOption.category == cat, DropdownOption.value == old).first()
+            row = s.query(DropdownOption).filter(
+                DropdownOption.account_id == tenant_id(),
+                DropdownOption.category == cat,
+                DropdownOption.value == old
+            ).first()
             if not row: return
-            exists = s.query(DropdownOption).filter(DropdownOption.category == cat, DropdownOption.value == new.strip()).first()
+            exists = s.query(DropdownOption).filter(
+                DropdownOption.account_id == tenant_id(),
+                DropdownOption.category == cat,
+                DropdownOption.value == new.strip()
+            ).first()
             if exists:
                 QMessageBox.information(self, "Dropdown", "Target value already exists."); return
             row.value = new.strip()
@@ -1755,7 +1780,11 @@ class DropdownOptionsDialog(QDialog):
         vals = [i.text() for i in items]
         with SessionLocal() as s:
             for v in vals:
-                q = s.query(DropdownOption).filter(DropdownOption.category == cat, DropdownOption.value == v)
+                q = s.query(DropdownOption).filter(
+                    DropdownOption.account_id == tenant_id(),
+                    DropdownOption.category == cat,
+                    DropdownOption.value == v
+                )
                 for d in q.all(): s.delete(d)
             s.commit()
         self._reload_values(cat)
@@ -1784,7 +1813,7 @@ class LeaveDefaultsDialog(QDialog):
             "_meta": {
                 "carry_policy": "reset" | "bring",
                 "carry_limit_enabled": true|false,
-                "carry_limit": 0.0   # max days carried if enabled
+                "carry_limit": 0.0
             }
         }
     Backward compatible with old table_json that was a plain {"1": days,...}.
@@ -1821,19 +1850,16 @@ class LeaveDefaultsDialog(QDialog):
 
         # --- settings row ---
         meta1 = QHBoxLayout()
-        # A) Pro-rated?
         self.prorated = QComboBox(); self.prorated.addItems(["False", "True"])
         meta1.addWidget(QLabel("Pro-rated?")); meta1.addWidget(self.prorated)
         meta1.addSpacing(24)
 
-        # B) Year-end handling: Reset or Bring forward
         self.carry_policy = QComboBox(); self.carry_policy.addItems(["Reset", "Bring forward"])
         self.carry_policy.currentTextChanged.connect(self._toggle_carry_ui)
         meta1.addWidget(QLabel("Year-end handling")); meta1.addWidget(self.carry_policy)
         meta1.addStretch(1)
         right.addLayout(meta1)
 
-        # C) Carry-forward limit controls
         meta2 = QHBoxLayout()
         self.carry_limit_enable = QCheckBox("Limit Bring Forward")
         self.carry_limit_enable.toggled.connect(self._toggle_carry_ui)
@@ -1847,7 +1873,6 @@ class LeaveDefaultsDialog(QDialog):
         meta2.addStretch(1)
         right.addLayout(meta2)
 
-        # table of years
         self.tbl = QTableWidget(50, 2)
         self.tbl.setHorizontalHeaderLabels(["Year", "Days"])
         for i in range(50):
@@ -1856,7 +1881,6 @@ class LeaveDefaultsDialog(QDialog):
         self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         right.addWidget(self.tbl, 1)
 
-        # save button
         save_row = QHBoxLayout()
         save = QPushButton("Save"); save.clicked.connect(self._save_current)
         save.setMaximumWidth(120)
@@ -1867,9 +1891,8 @@ class LeaveDefaultsDialog(QDialog):
         root.addLayout(right, 2)
 
         self._load_types()
-        self._toggle_carry_ui()  # initial UI state
+        self._toggle_carry_ui()
 
-    # ---------- helpers ----------
     def _toggle_carry_ui(self):
         bring = (self.carry_policy.currentText() == "Bring forward")
         self.carry_limit_enable.setEnabled(bring)
@@ -1878,7 +1901,9 @@ class LeaveDefaultsDialog(QDialog):
     def _load_types(self):
         self.type_list.clear()
         with SessionLocal() as s:
-            rows = s.query(LeaveDefault.leave_type).distinct().order_by(LeaveDefault.leave_type).all()
+            rows = s.query(LeaveDefault.leave_type)\
+                    .filter(LeaveDefault.account_id == tenant_id())\
+                    .distinct().order_by(LeaveDefault.leave_type).all()
         for (t,) in rows:
             self.type_list.addItem(t)
         if self.type_list.count() == 0:
@@ -1888,7 +1913,10 @@ class LeaveDefaultsDialog(QDialog):
 
     def _ensure_row(self, leave_type: str):
         with SessionLocal() as s:
-            row = s.query(LeaveDefault).filter(LeaveDefault.leave_type == leave_type).first()
+            row = s.query(LeaveDefault)\
+                   .filter(LeaveDefault.account_id == tenant_id(),
+                           LeaveDefault.leave_type == leave_type)\
+                   .first()
             if not row:
                 years = {str(i + 1): 14 for i in range(50)}
                 meta = {"carry_policy": "reset", "carry_limit_enabled": False, "carry_limit": 0.0}
@@ -1899,23 +1927,24 @@ class LeaveDefaultsDialog(QDialog):
                 ))
                 s.commit()
 
-    # ---------- load UI for selected type ----------
     def _on_type_changed(self, curr, _prev):
         if not curr:
             return
         typ = curr.text()
         self.lbl_curr.setText(typ)
         with SessionLocal() as s:
-            row = s.query(LeaveDefault).filter(LeaveDefault.leave_type == typ).first()
+            row = s.query(LeaveDefault)\
+                   .filter(LeaveDefault.account_id == tenant_id(),
+                           LeaveDefault.leave_type == typ).first()
         if not row:
             self._ensure_row(typ)
             with SessionLocal() as s:
-                row = s.query(LeaveDefault).filter(LeaveDefault.leave_type == typ).first()
+                row = s.query(LeaveDefault)\
+                       .filter(LeaveDefault.account_id == tenant_id(),
+                               LeaveDefault.leave_type == typ).first()
 
-        # columns
         self.prorated.setCurrentText("True" if row.prorated else "False")
 
-        # unpack table_json with backward compatibility
         try:
             blob = json.loads(row.table_json or "{}")
         except Exception:
@@ -1928,37 +1957,31 @@ class LeaveDefaultsDialog(QDialog):
             years = blob if isinstance(blob, dict) else {}
             meta = {}
 
-        # meta defaults
-        carry_policy = meta.get("carry_policy", "reset")  # "reset" | "bring"
+        carry_policy = meta.get("carry_policy", "reset")
         self.carry_policy.setCurrentText("Bring forward" if carry_policy == "bring" else "Reset")
         self.carry_limit_enable.setChecked(bool(meta.get("carry_limit_enabled", False)))
         try:
             self.carry_limit.setValue(float(meta.get("carry_limit", 0.0)))
         except Exception:
             self.carry_limit.setValue(0.0)
-        # derived legacy column
+
         row.yearly_reset = (carry_policy != "bring")
         with SessionLocal() as s:
             s.merge(row); s.commit()
 
-        # fill table
         for i in range(50):
             self.tbl.setItem(i, 0, QTableWidgetItem(str(i + 1)))
             self.tbl.setItem(i, 1, QTableWidgetItem(str(years.get(str(i + 1), 14))))
 
         self._toggle_carry_ui()
 
-    # ---------- save ----------
     def _save_current(self):
         itm = self.type_list.currentItem()
         if not itm:
             return
         typ = itm.text()
 
-        # years grid
         years = {str(i + 1): self._int_or_zero(self.tbl.item(i, 1)) for i in range(50)}
-
-        # meta
         carry_policy = "bring" if self.carry_policy.currentText() == "Bring forward" else "reset"
         meta = {
             "carry_policy": carry_policy,
@@ -1967,26 +1990,25 @@ class LeaveDefaultsDialog(QDialog):
         }
 
         with SessionLocal() as s:
-            row = s.query(LeaveDefault).filter(LeaveDefault.leave_type == typ).first()
+            row = s.query(LeaveDefault)\
+                   .filter(LeaveDefault.account_id == tenant_id(),
+                           LeaveDefault.leave_type == typ).first()
             if not row:
                 row = LeaveDefault(account_id=tenant_id(), leave_type=typ)
                 s.add(row)
 
             row.prorated = (self.prorated.currentText() == "True")
-            # keep legacy column in sync with policy
             row.yearly_reset = (carry_policy != "bring")
-
             row.table_json = json.dumps({"years": years, "_meta": meta})
             s.commit()
 
         QMessageBox.information(self, "Leave Defaults", f"Saved '{typ}'")
 
-    # ---------- CRUD for types ----------
     def _add_type(self):
         name, ok = QInputDialog.getText(self, "Add Leave Type", "Name:")
         if not ok or not name.strip():
             return
-        name = name.strip()
+        name = _clean_text(name)
         self._ensure_row(name)
         self._load_types()
         items = self.type_list.findItems(name, Qt.MatchExactly)
@@ -2001,9 +2023,11 @@ class LeaveDefaultsDialog(QDialog):
         new, ok = QInputDialog.getText(self, "Rename Leave Type", "New name:", text=old)
         if not ok or not new.strip() or new == old:
             return
-        new = new.strip()
+        new = _clean_text(new)
         with SessionLocal() as s:
-            row = s.query(LeaveDefault).filter(LeaveDefault.leave_type == old).first()
+            row = s.query(LeaveDefault)\
+                   .filter(LeaveDefault.account_id == tenant_id(),
+                           LeaveDefault.leave_type == old).first()
             if row:
                 row.leave_type = new
                 s.commit()
@@ -2020,7 +2044,9 @@ class LeaveDefaultsDialog(QDialog):
         if QMessageBox.question(self, "Delete", f"Delete leave type '{typ}'?") != QMessageBox.Yes:
             return
         with SessionLocal() as s:
-            rows = s.query(LeaveDefault).filter(LeaveDefault.leave_type == typ).all()
+            rows = s.query(LeaveDefault)\
+                    .filter(LeaveDefault.account_id == tenant_id(),
+                            LeaveDefault.leave_type == typ).all()
             for r in rows:
                 s.delete(r)
             s.commit()
@@ -2051,18 +2077,16 @@ def _employeeeditor_save(self: EmployeeEditor):
 
     def dget(qd: QDateEdit) -> date | None:
         try:
-            # support BlankableDateEdit first
             if hasattr(qd, "date_or_none"):
                 d = qd.date_or_none()
                 return d.toPython() if d else None
-            # fallback: treat special minimum as blank
             if qd.specialValueText() and qd.date() == qd.minimumDate():
                 return None
             return qd.date().toPython()
         except Exception:
             return None
 
-    name = (self.full_name.text() or "").strip()
+    name = _clean_text(self.full_name.text())
     if not name:
         QMessageBox.warning(self, "Missing", "Full Name is required.")
         return
@@ -2095,11 +2119,11 @@ def _employeeeditor_save(self: EmployeeEditor):
 
         # personal
         e.full_name = name
-        e.email = (self.email.text() or "").strip()
-        e.contact_number = (self.contact.text() or "").strip()
-        e.address = (self.address.text() or "").strip()
+        e.email = _clean_text(self.email.text())
+        e.contact_number = _clean_text(self.contact.text())
+        e.address = _clean_text(self.address.text())
         e.id_type = self.id_type.currentText() or ""
-        e.id_number = (self.id_number.text() or "").strip()
+        e.id_number = _clean_text(self.id_number.text())
         e.gender = self.gender.currentText() or ""
         e.dob = dget(self.dob)
         e.race = self.race.currentText() or ""
@@ -2110,7 +2134,7 @@ def _employeeeditor_save(self: EmployeeEditor):
         # employment
         e.employment_status = self.employment_status.currentText() or ""
         e.employment_pass = self.employment_pass.currentText() or ""
-        e.work_permit_number = (self.work_permit_number.text() or "").strip() if self.work_permit_number.isEnabled() else ""
+        e.work_permit_number = _clean_text(self.work_permit_number.text()) if self.work_permit_number.isEnabled() else ""
         e.department = self.department.currentText() or ""
         e.position = self.position.currentText() or ""
         e.employment_type = self.employment_type.currentText() or ""
@@ -2120,7 +2144,7 @@ def _employeeeditor_save(self: EmployeeEditor):
 
         # payment
         e.bank = self.bank.currentText() or ""
-        e.bank_account = (self.bank_account.text() or "").strip()
+        e.bank_account = _clean_text(self.bank_account.text())
 
         # remuneration snapshot
         e.incentives = f2(self.incentives.text())
@@ -2135,8 +2159,8 @@ def _employeeeditor_save(self: EmployeeEditor):
         for r in range(self.salary_tbl.rowCount()):
             try:
                 amt = f2(self.salary_tbl.item(r, 0).text())
-                sd_txt = (self.salary_tbl.item(r, 1).text() or "").strip()
-                ed_txt = (self.salary_tbl.item(r, 2).text() or "").strip()
+                sd_txt = _clean_text(self.salary_tbl.item(r, 1).text() or "")
+                ed_txt = _clean_text(self.salary_tbl.item(r, 2).text() or "")
                 sd = datetime.strptime(sd_txt, "%Y-%m-%d").date() if sd_txt else None
                 ed = datetime.strptime(ed_txt, "%Y-%m-%d").date() if ed_txt else None
             except Exception:

@@ -1,983 +1,923 @@
-# leave_module.py
+# leave_module.py — NexaCore ERP (Employee Management > Leave)
+# Amended to implement EOL-based entitlement with prorate/reset/bring-forward-limit
+# and robust used-days counting with work schedules and holidays.
+
 from __future__ import annotations
 
-import re
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Optional, Dict, List, Tuple, Set
+from typing import Dict, List, Optional, Tuple
+
+import traceback
+import json
 
 from PySide6.QtCore import Qt, QDate
 from PySide6.QtWidgets import (
     QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QDateEdit,
     QTableWidget, QTableWidgetItem, QLineEdit, QPushButton, QHeaderView, QMessageBox,
-    QSpinBox, QFormLayout, QDoubleSpinBox, QAbstractItemView
+    QFormLayout, QAbstractItemView
 )
 
-# Project imports (keep these paths)
+# Project imports
 from ....core.database import get_employee_session as SessionLocal
 from ....core.tenant import id as tenant_id
-from ..models import Employee, LeaveDefault, WorkScheduleDay, Holiday  # employee DB models
+from ..models import Employee, LeaveDefault, WorkScheduleDay, Holiday, LeaveEntitlement  # [NC PATCH] add LeaveEntitlement
 
-MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"]
-_MIN_DATE = date(1900, 1, 1)
+# ---------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------
 
-
-# ----------------------------
-# Internal DB helpers (safe)
-# ----------------------------
-
-def _safe_scalar(session, sql: str, params: dict = None, default=None):
-    try:
-        res = session.execute(sql, params or {})
-        row = res.first()
-        return row[0] if row and len(row) > 0 else default
-    except Exception:
-        return default
-
-def _safe_rows(session, sql: str, params: dict = None) -> List[tuple]:
-    try:
-        res = session.execute(sql, params or {})
-        return list(res.fetchall())
-    except Exception:
-        return []
-
-def _table_exists(session, table_name: str) -> bool:
-    sql = """
-    SELECT COUNT(*) FROM sqlite_master
-    WHERE type='table' AND name=:name
-    """
-    return bool(_safe_scalar(session, sql, {"name": table_name}, 0))
-
-
-# ----------------------------
-# Date / service helpers
-# ----------------------------
-
-def _months_since(d0: date, d1: date) -> int:
-    """Whole months from d0 to d1. June→Dec inclusive for same-year is 6."""
-    if not d0 or d0 <= _MIN_DATE or d1 < d0:
-        return 0
-    return (d1.year - d0.year) * 12 + (d1.month - d0.month) - (0 if d1.day >= d0.day else 1)
-
-def _service_year_idx(join: date, asof: date) -> int:
-    m = _months_since(join, asof)
-    return max(1, m // 12 + 1)
-
-def _emp_join_date(emp: Employee) -> date:
-    for name in ("join_date", "date_employment", "date_join", "employment_date"):
-        if hasattr(emp, name):
-            v = getattr(emp, name)
+def _safe_date(obj, *field_names: str) -> Optional[date]:
+    for fn in field_names:
+        try:
+            v = getattr(obj, fn)
             if isinstance(v, date):
                 return v
-    return _MIN_DATE
+            if isinstance(v, (str, bytes)):
+                s = v.decode() if isinstance(v, bytes) else v
+                if s:
+                    return date.fromisoformat(s)
+        except Exception:
+            pass
+    return None
 
-def _add_months(d: date, n: int) -> date:
-    """Return d shifted by n months; clamp day to 1 for our use."""
-    y = d.year + (d.month - 1 + n) // 12
-    m = (d.month - 1 + n) % 12 + 1
-    return date(y, m, 1)
+
+def _today() -> date:
+    return date.today()
 
 
-# ----------------------------
-# Leave Defaults (years + meta)
-# ----------------------------
-
-def _years_map_of(blob) -> Dict[str, float]:
-    if isinstance(blob, dict) and "years" in blob and isinstance(blob["years"], dict):
-        return {str(k): float(v) for k, v in blob["years"].items()}
-    if isinstance(blob, dict):
-        return {str(k): float(v) for k, v in blob.items()}
+def _jdict(x) -> dict:
+    """Return dict from JSON string or dict, else {}."""
+    if isinstance(x, dict):
+        return x
+    if isinstance(x, (str, bytes)):
+        try:
+            s = x.decode() if isinstance(x, bytes) else x
+            v = json.loads(s)
+            return v if isinstance(v, dict) else {}
+        except Exception:
+            return {}
     return {}
 
-def _meta_of(blob) -> dict:
-    if isinstance(blob, dict) and "_meta" in blob and isinstance(blob["_meta"], dict):
-        m = blob["_meta"]
-    else:
-        m = {}
-    return {
-        "carry_policy": str(m.get("carry_policy", "reset")).lower(),  # "reset" | "bring"
-        "carry_limit_enabled": bool(m.get("carry_limit_enabled", False)),
-        "carry_limit": float(m.get("carry_limit", 0.0)),
-        "prorated": bool(m.get("prorated", False)),
+
+def _as_bool(x) -> bool:
+    if isinstance(x, bool):
+        return x
+    if isinstance(x, (int, float)):
+        return bool(x)
+    if isinstance(x, (str, bytes)):
+        s = x.decode() if isinstance(x, bytes) else x
+        s = s.strip().lower()
+        return s in {"1", "true", "t", "yes", "y"}
+    return False
+
+
+# ---------------------------------------------------------------
+# Service-year helpers for entitlement math
+# ---------------------------------------------------------------
+
+def _months_between(d0: date, d1: date) -> Tuple[int, int]:
+    """Return completed (years, months remainder) between d0 and d1. If d1 <= d0 -> (0,0)."""
+    if d1 <= d0:
+        return 0, 0
+    months = (d1.year - d0.year) * 12 + (d1.month - d0.month)
+    if d1.day < d0.day:
+        months -= 1
+    years = months // 12
+    rem = months % 12
+    return years, rem
+
+
+def _add_years(d: date, years: int) -> date:
+    try:
+        return d.replace(year=d.year + years)
+    except ValueError:
+        return d.replace(month=2, day=28, year=d.year + years)
+
+
+def _service_year_period(join_dt: date, k: int) -> Tuple[date, date]:
+    """Service year k (1-based) as inclusive window [start, end]."""
+    start = _add_years(join_dt, k - 1)
+    end = _add_years(join_dt, k) - timedelta(days=1)
+    return start, end
+
+
+# ---------------------------------------------------------------
+# EOL sources and policy
+# ---------------------------------------------------------------
+
+def _eol_map_for_emp(session, emp: Employee, leave_type: str) -> Dict[int, float]:
+    """Return per-service-year entitlement for this employee and leave_type.
+    Priority:
+      1) Per-employee overrides in LeaveEntitlement (employee_id, leave_type, year_of_service)
+      2) LeaveDefault.table_json['years'] for this leave_type (scoped to tenant)
+    """
+    eol_map: Dict[int, float] = {}
+
+    # 1) Per-employee overrides (override first)
+    rows = (
+        session.query(LeaveEntitlement.year_of_service, LeaveEntitlement.days)
+        .filter(
+            LeaveEntitlement.employee_id == emp.id,
+            LeaveEntitlement.leave_type == leave_type,
+        )
+        .all()
+    )
+    for yos, days in rows:
+        try:
+            eol_map[int(yos)] = float(days or 0.0)
+        except Exception:
+            pass
+
+    if eol_map:
+        return eol_map
+
+    # 2) Fallback: LeaveDefault
+    ld = (
+        session.query(LeaveDefault)
+        .filter(
+            LeaveDefault.account_id == tenant_id(),  # [NC PATCH] scope to tenant
+            LeaveDefault.leave_type == leave_type,
+        )
+        .first()
+    )
+    if ld:
+        tj = _jdict(getattr(ld, "table_json", {}))
+        years_blob = tj.get("years", {}) or {}
+        if isinstance(years_blob, dict):
+            for k, v in years_blob.items():
+                try:
+                    eol_map[int(k)] = float(v)
+                except Exception:
+                    pass
+
+    return eol_map
+
+
+def _policy_for_leave_type(session, leave_type: str) -> Dict:
+    """Read policy flags for a leave_type.
+    Expected fields from LeaveDefault:
+      - prorated: bool or text
+      - table_json._meta.carry_policy: "bring" or "reset"
+      - table_json._meta.carry_limit_enabled: bool or text
+      - table_json._meta.carry_limit: float or text
+    Safe defaults if missing.
+    """
+    pol = {
+        "prorated": False,
+        "carry_policy": "bring",
+        "carry_limit_enabled": False,
+        "carry_limit": 0.0,
     }
-
-def _collect_years_from_row(row: LeaveDefault) -> Dict[str, float]:
-    """
-    Accept:
-      - table_json with {"years":{"1":7,"2":8,...}} or {"1":7,...}
-      - columns year1..year20 or y1..y20
-    """
-    years: Dict[str, float] = {}
-    # JSON path
-    try:
-        blob = json_load(getattr(row, "table_json", "") or "{}")
-        years.update(_years_map_of(blob))
-    except Exception:
-        pass
-    # Column path
-    for attr in dir(row):
-        m = re.fullmatch(r"(?:year|y)_?(\d{1,2})", attr, flags=re.IGNORECASE)
-        if not m:
-            continue
-        n = int(m.group(1))
-        if n <= 0:
-            continue
+    ld = (
+        session.query(LeaveDefault)
+        .filter(
+            LeaveDefault.account_id == tenant_id(),  # [NC PATCH] scope to tenant
+            LeaveDefault.leave_type == leave_type
+        )
+        .first()
+    )
+    if ld:
+        pol["prorated"] = _as_bool(getattr(ld, "prorated", False))
+        tj = _jdict(getattr(ld, "table_json", {}))
+        meta = _jdict(tj.get("_meta", {}))
+        cp = str(meta.get("carry_policy", pol["carry_policy"]))
+        pol["carry_policy"] = cp if cp in {"bring", "reset"} else pol["carry_policy"]
+        pol["carry_limit_enabled"] = _as_bool(meta.get("carry_limit_enabled", pol["carry_limit_enabled"]))
         try:
-            val = getattr(row, attr)
+            pol["carry_limit"] = float(meta.get("carry_limit", pol["carry_limit"]))
         except Exception:
-            val = None
-        if val is None:
-            continue
+            pass
+    return pol
+
+
+def _eol_amount(eol_map: Dict[int, float], k: int) -> float:
+    if not eol_map:
+        return 0.0
+    if k in eol_map:
+        return float(eol_map[k])
+    mk = max(eol_map.keys())
+    return float(eol_map[mk])
+
+
+# ---------------------------------------------------------------
+# Work schedule and holiday weights
+# ---------------------------------------------------------------
+
+def _weekday_field(ws_row: WorkScheduleDay) -> Optional[int]:
+    for name in ("weekday", "day_of_week", "dow", "dayindex"):
         try:
-            years[str(n)] = float(val)
+            v = getattr(ws_row, name)
+            if isinstance(v, int):
+                return v
         except Exception:
-            try:
-                years[str(n)] = float(str(val).strip())
-            except Exception:
-                continue
-    # keep ordered positives only
-    ord_years = {}
-    for k, v in sorted(((int(k), v) for k, v in years.items() if v is not None), key=lambda x: x[0]):
-        ord_years[str(k)] = float(v)
-    return ord_years
-
-def _allow_for_year(years: Dict[str, float], yidx: int) -> float:
-    if not years:
-        return 0.0
-    ks = sorted(int(k) for k in years.keys())
-    y = min(max(1, yidx), ks[-1])
-    return float(years.get(str(y), 0.0))
-
-def _fetch_leave_defaults(session, leave_type: str):
-    """Return (prorated, years_map, meta_dict)."""
-    row = session.query(LeaveDefault).filter(LeaveDefault.leave_type == leave_type).first()
-    if not row:
-        return False, {}, {"carry_policy": "reset", "carry_limit_enabled": False, "carry_limit": 0.0, "prorated": False}
-    years = _collect_years_from_row(row)
-    # meta from JSON if present; defaults otherwise
-    try:
-        blob = json_load(getattr(row, "table_json", "") or "{}")
-    except Exception:
-        blob = {}
-    meta = _meta_of(blob)
-    # allow explicit boolean column too
-    if hasattr(row, "prorated"):
-        meta["prorated"] = bool(getattr(row, "prorated"))
-    return bool(meta["prorated"]), years, meta
+            pass
+    return None
 
 
-# ----------------------------
-# Used-days queries
-# ----------------------------
-
-def _used_days_total_year(session, emp_id: int, leave_type: str, year: int, up_to: Optional[date] = None) -> float:
-    if not _table_exists(session, "leave_applications"):
-        return 0.0
-    params = {"e": emp_id, "t": leave_type, "y": str(year)}
-    extra = ""
-    if up_to:
-        params["end"] = up_to.isoformat()
-        extra = " AND date(start_date) <= :end "
-    v = _safe_scalar(session, f"""
-        SELECT COALESCE(SUM(used_days),0)
-        FROM leave_applications
-        WHERE employee_id=:e AND leave_type=:t
-          AND strftime('%Y', start_date)=:y
-          AND COALESCE(status,'Approved')='Approved'
-          {extra}
-    """, params, 0.0)
-    try:
-        return float(v or 0.0)
-    except Exception:
-        return 0.0
-
-def _used_days_by_year_upto(session, emp_id: int, leave_type: str, up_to: date) -> Dict[int, float]:
-    if not _table_exists(session, "leave_applications"):
-        return {}
-    rows = _safe_rows(session, """
-        SELECT CAST(strftime('%Y', start_date) AS INT) as y, COALESCE(SUM(used_days),0)
-        FROM leave_applications
-        WHERE employee_id=:e AND leave_type=:t
-          AND COALESCE(status,'Approved')='Approved'
-          AND date(start_date) <= :end
-        GROUP BY y
-    """, {"e": emp_id, "t": leave_type, "end": up_to.isoformat()})
-    out: Dict[int, float] = {}
-    for y, s in rows:
-        try:
-            out[int(y)] = float(s or 0.0)
-        except Exception:
-            continue
-    return out
-
-
-# ----------------------------
-# Entitlement calculators (match your 6 cases)
-# ----------------------------
-
-def _entitlement_asof(session, emp: Employee, leave_type: str, today: date) -> Tuple[float, str, bool, float]:
+def _employee_weekday_weight(session, emp_id: int, d: date) -> float:
+    """Weight for a given date by employee work schedule: 1.0 work, 0.5 half, 0.0 off.
+    Defaults to Mon-Fri=1.0, Sat/Sun=0.0 if no rows.
     """
-    Returns (entitlement_as_of_today, carry_policy, limit_enabled, limit_value).
-    Implements:
-      1) prorated & bring-unlimited     -> cumulative monthly accrual
-      2) non-prorated & bring-unlimited -> sum of full years up to current service year
-      3) prorated & reset               -> months in current service-year * A_current/12
-      4) non-prorated & reset           -> A_current
-      5) prorated & bring-limit         -> monthly accrual with year-end cap and prior-year used deducted before capping
-      6) non-prorated & bring-limit     -> add A at each anniversary; at each Dec 31 cap after subtracting year's used
-    """
-    prorated, years, meta = _fetch_leave_defaults(session, leave_type)
-    carry_policy = meta.get("carry_policy", "reset")
-    limit_enabled = bool(meta.get("carry_limit_enabled", False))
-    limit_val = float(meta.get("carry_limit", 0.0))
-
-    join = _emp_join_date(emp)
-    if not join or join <= _MIN_DATE or today < join:
-        return 0.0, carry_policy, limit_enabled, limit_val
-
-    yidx_today = _service_year_idx(join, today)
-    A_today = _allow_for_year(years, yidx_today)
-
-    # ---- RESET policy ----
-    if carry_policy == "reset":
-        if prorated:
-            # Case 3: months since last anniversary * A_current / 12
-            months_into_service_year = _months_since(join, today) % 12
-            return (months_into_service_year / 12.0) * A_today, carry_policy, limit_enabled, limit_val
-        else:
-            # Case 4: full entitlement of current service year
-            return A_today, carry_policy, limit_enabled, limit_val
-
-    # ---- BRING (unlimited) ----
-    if carry_policy == "bring" and not limit_enabled:
-        if prorated:
-            # Case 1: cumulative monthly accrual since join
-            total_m = _months_since(join, today)
-            acc = 0.0
-            for m in range(total_m):
-                yidx = m // 12 + 1
-                acc += _allow_for_year(years, yidx) / 12.0
-            return acc, carry_policy, False, 0.0
-        else:
-            # Case 2: sum of full years up to current service year
-            s = 0.0
-            for i in range(1, yidx_today + 1):
-                s += _allow_for_year(years, i)
-            return s, carry_policy, False, 0.0
-
-    # ---- BRING with LIMIT ----
-    used_by_year = _used_days_by_year_upto(session, emp.id, leave_type, today)
-
-    if prorated:
-        # Case 5: monthly accrual with year-end cap, subtract used of that year before capping
-        total_m = _months_since(join, today)
-        bal = 0.0
-        for m in range(total_m):
-            when = _add_months(join, m)  # first day of that month
-            yidx = m // 12 + 1
-            bal += _allow_for_year(years, yidx) / 12.0
-            # apply prior-year cap at Dec of past years
-            if when.month == 12 and when.year < today.year:
-                used_y = float(used_by_year.get(when.year, 0.0))
-                bal = max(0.0, bal - used_y)
-                bal = min(bal, limit_val)
-        # current year: do not cap yet; leave current-year used to be shown in "Used"
-        return bal, carry_policy, True, limit_val
-    else:
-        # Case 6: add A at each anniversary; cap at each Dec 31 after subtracting that year's used
-        bal = 0.0
-        # anniversaries that have occurred up to today (include join day as year1)
-        anniv_count = _months_since(join, today) // 12 + 1
-        # process year-by-year boundaries
-        # Build event list: (date, kind, value)
-        events: List[Tuple[date, str, float]] = []
-        # anniversaries
-        for i in range(1, anniv_count + 1):
-            d = _add_months(join, (i - 1) * 12)
-            if d <= today:
-                events.append((d, "anniv", _allow_for_year(years, i)))
-        # year-ends before current year
-        y = join.year
-        while y < today.year:
-            events.append((date(y, 12, 31), "year_end", 0.0))
-            y += 1
-        # sort events chronologically
-        events.sort(key=lambda x: x[0])
-        for d, kind, val in events:
-            if kind == "anniv":
-                bal += float(val)
-            elif kind == "year_end":
-                used_y = float(used_by_year.get(d.year, 0.0))
-                bal = max(0.0, bal - used_y)
-                if limit_enabled:
-                    bal = min(bal, limit_val)
-        return bal, carry_policy, True, limit_val
-
-
-# ----------------------------
-# Business rules: used-days calculator for application form
-# ----------------------------
-
-def _default_workdays() -> Set[int]:
-    return {0, 1, 2, 3, 4}
-
-def _employee_workdays(session, emp_id: int) -> Set[int]:
     rows = session.query(WorkScheduleDay).filter(WorkScheduleDay.employee_id == emp_id).all()
     if not rows:
-        return _default_workdays()
-    days = {int(getattr(r, "weekday")) for r in rows if bool(getattr(r, "working", True))}
-    return days or _default_workdays()
+        return 1.0 if d.weekday() < 5 else 0.0
 
-def _holidays_between(session, emp: Employee, d0: date, d1: date) -> Dict[date, float]:
-    if not emp:
-        return {}
-    group = getattr(emp, "holiday_group", "") or ""
-    if not group:
-        return {}
-    q = session.query(Holiday).filter(
-        Holiday.group_code == group,
-        Holiday.date >= d0,
-        Holiday.date <= d1
-    )
+    # build map
+    mp: Dict[int, float] = {}
+    for r in rows:
+        idx = _weekday_field(r)
+        if idx is None:
+            continue
+        # [NC PATCH] respect 'working' flag and "Full/Half"
+        try:
+            if hasattr(r, "working") and not bool(getattr(r, "working")):
+                mp[idx] = 0.0
+                continue
+        except Exception:
+            pass
+        day_type = str(getattr(r, "day_type", "Full") or "Full").strip().lower()
+        if day_type in ("full", "work", "working", "full day", "fullday"):
+            mp[idx] = 1.0
+        elif day_type in ("half", "half day", "halfday"):
+            mp[idx] = 0.5
+        else:
+            # unknown label → treat as working full if 'working' True, otherwise off
+            mp[idx] = 1.0
+    return mp.get(d.weekday(), 0.0)
+
+
+def _holiday_weight_for_date(h: Holiday) -> float:
+    # Support either full-day only or optional half-day if column exists
+    try:
+        is_half = bool(getattr(h, "is_half_day"))
+        return 0.5 if is_half else 1.0
+    except Exception:
+        return 1.0
+
+
+def _holiday_dates_weight(session, emp: Employee, d0: date, d1: date) -> Dict[date, float]:
+    """Return {date: weight} for holidays in [d0..d1] that apply to emp's holiday_group.
+    Weight 1.0 = full-day holiday, 0.5 = half-day.
+    """
+    group_val = getattr(emp, "holiday_group", None)
+    q = session.query(Holiday).filter(Holiday.account_id == tenant_id())  # [NC PATCH] scope to tenant
+    if group_val:
+        # [NC PATCH] correct column is group_code
+        q = q.filter(Holiday.group_code == group_val)
+    # [NC PATCH] only pull holidays in range
+    try:
+        q = q.filter(Holiday.date >= d0, Holiday.date <= d1)
+    except Exception:
+        pass
+
+    rows = q.all()
+
     out: Dict[date, float] = {}
-    for h in q.all():
-        out[h.date] = 1.0  # extend to 0.5 if you add half-day holidays later
+    for h in rows:
+        hd = _safe_date(h, "date", "holiday_date", "dt")
+        if not hd:
+            continue
+        if d0 <= hd <= d1:
+            out[hd] = _holiday_weight_for_date(h)
     return out
 
-def _daterange(d0: date, d1: date):
-    cur = d0
-    while cur <= d1:
-        yield cur
-        cur = cur + timedelta(days=1)
 
-def _compute_used_days(
-    session,
-    emp_id: int,
-    s_date: date,
-    s_half: str,  # "AM" or "PM"
-    e_date: date,
-    e_half: str   # "AM" or "PM"
-) -> float:
-    if e_date < s_date:
+# ---------------------------------------------------------------
+# Used-days calculator for a single application window
+# ---------------------------------------------------------------
+
+def _compute_used_days(session, emp_id: int, s: date, s_half: str, e: date, e_half: str) -> float:
+    """Count used days between s and e inclusive using work schedule and holidays.
+    s_half/e_half in {"AM","PM"} determine half-day at endpoints.
+    Holidays subtract weight from that day up to the workday weight floor of 0.
+    """
+    if e < s:
         return 0.0
-    emp = session.get(Employee, emp_id)
-    workdays = _employee_workdays(session, emp_id)
-    hols = _holidays_between(session, emp, s_date, e_date)
 
-    def is_workday(d: date) -> bool:
-        return d.weekday() in workdays
+    emp = session.query(Employee).get(emp_id)
+    if not emp:
+        return 0.0
 
-    def holiday_weight(d: date, half: Optional[str] = None) -> float:
-        w = hols.get(d, 0.0)
-        return 1.0 if w >= 1.0 else 0.0
+    holidays = _holiday_dates_weight(session, emp, s, e)
 
-    # same-day
-    if s_date == e_date:
-        if not is_workday(s_date):
+    def day_portion(d: date) -> float:
+        base = _employee_weekday_weight(session, emp_id, d)
+        if base <= 0.0:
             return 0.0
-        if s_half == "AM" and e_half == "AM":
-            gross = 0.5
-            red = holiday_weight(s_date, "AM")
-            return max(0.0, gross - min(red, gross))
-        if s_half == "PM" and e_half == "PM":
-            gross = 0.5
-            red = holiday_weight(s_date, "PM")
-            return max(0.0, gross - min(red, gross))
-        if s_half == "AM" and e_half == "PM":
-            gross = 1.0
-            red = holiday_weight(s_date, None)
-            return max(0.0, gross - min(red, gross))
+        h_w = holidays.get(d, 0.0)
+        eff = max(0.0, base - h_w)
+        return eff
+
+    total = 0.0
+    cur = s
+    one = timedelta(days=1)
+    while cur <= e:
+        eff = day_portion(cur)
+        if eff <= 0.0:
+            cur += one
+            continue
+
+        if s == e:
+            # same day
+            if s_half == "AM" and e_half == "AM":
+                total += min(eff, 0.5)
+            elif s_half == "PM" and e_half == "PM":
+                total += min(eff, 0.5)
+            else:
+                total += eff
+        elif cur == s:
+            total += min(eff, 0.5) if s_half == "PM" else eff
+        elif cur == e:
+            total += min(eff, 0.5) if e_half == "AM" else eff
+        else:
+            total += eff
+        cur += one
+
+    return round(float(total), 3)
+
+
+# ---------------------------------------------------------------
+# Usage aggregation over windows and years
+# ---------------------------------------------------------------
+
+def _used_days_in_window(session, emp_id: int, leave_type: str, w0: date, w1: date) -> float:
+    """Sum approved leave usage inside [w0..w1], clipped to the window.
+    Uses _compute_used_days for accurate work/holiday logic.
+    """
+    from sqlite3 import OperationalError
+    acc = tenant_id()
+
+    q = (
+        """
+        SELECT start_date, start_half, end_date, end_half
+        FROM leave_applications
+        WHERE account_id = ?
+          AND employee_id = ?
+          AND leave_type = ?
+          AND status = 'Approved'
+          AND NOT (date(end_date) < date(?) OR date(start_date) > date(?))
+        """
+    )
+
+    try:
+        raw_conn = session.connection().connection  # SQLAlchemy -> sqlite3
+        cur = raw_conn.cursor()
+        cur.execute(q, (acc, emp_id, leave_type, w0.isoformat(), w1.isoformat()))
+        rows = cur.fetchall()
+    except OperationalError:
+        return 0.0
+    except Exception:
         return 0.0
 
-    # multi-day
     total = 0.0
-    for d in _daterange(s_date, e_date):
-        if not is_workday(d):
+    for sd_s, sh, ed_s, eh in rows:
+        try:
+            s_all = date.fromisoformat(sd_s)
+            e_all = date.fromisoformat(ed_s)
+        except Exception:
             continue
-        if d == s_date:
-            day_take = 0.5 if s_half == "PM" else 1.0
-            red = holiday_weight(d, s_half if day_take == 0.5 else None)
-            total += max(0.0, day_take - min(red, day_take))
-        elif d == e_date:
-            day_take = 0.5 if e_half == "AM" else 1.0
-            red = holiday_weight(d, e_half if day_take == 0.5 else None)
-            total += max(0.0, day_take - min(red, day_take))
-        else:
-            day_take = 1.0
-            red = holiday_weight(d, None)
-            total += max(0.0, day_take - min(red, day_take))
+        s = max(s_all, w0)
+        e = min(e_all, w1)
+        if s > e:
+            continue
+        s_half = sh if s_all >= w0 else "AM"
+        e_half = eh if e_all <= w1 else "PM"
+        total += _compute_used_days(session, emp_id, s, s_half, e, e_half)
+    return float(total)
+
+
+def _adjustments_sum_for_year(session, emp_id: int, leave_type: str, year: int) -> float:
+    """Sum of leave_adjustments.days for a given year. Positive adds entitlement, negative reduces."""
+    from sqlite3 import OperationalError
+    acc = tenant_id()
+
+    q = (
+        """
+        SELECT COALESCE(SUM(days), 0.0)
+        FROM leave_adjustments
+        WHERE account_id = ? AND employee_id = ? AND leave_type = ? AND year = ?
+        """
+    )
+    try:
+        raw_conn = session.connection().connection
+        cur = raw_conn.cursor()
+        cur.execute(q, (acc, emp_id, leave_type, int(year)))
+        row = cur.fetchone()
+        return float(row[0] or 0.0)
+    except OperationalError:
+        return 0.0
+    except Exception:
+        return 0.0
+
+
+def _used_days_total_year(session, emp_id: int, leave_type: str, year: int, include_adjustments: bool = True) -> float:
+    y0 = date(year, 1, 1)
+    y1 = date(year, 12, 31)
+    used = _used_days_in_window(session, emp_id, leave_type, y0, y1)
+    if include_adjustments:
+        used += _adjustments_sum_for_year(session, emp_id, leave_type, year)
+    return round(float(used), 3)
+
+
+# ---------------------------------------------------------------
+# Entitlement engine combining all scenarios
+# ---------------------------------------------------------------
+
+def _entitlement_asof(session, emp: Employee, leave_type: str, as_of: date) -> float:
+    """Implements 6 scenarios from user spec.
+
+    carry_policy='bring', limit off:
+        prorated=False -> sum(full years) + full(current)
+        prorated=True  -> sum(full years) + (months/12)*current
+
+    carry_policy='reset':
+        prorated=False -> full(current only)
+        prorated=True  -> (months/12)*current only
+
+    carry_policy='bring', limit on (limit = L):
+        Walk service years, carry leftover across boundaries with cap L.
+        Current year portion is full(current) if prorated=False else (months/12)*current.
+    """
+    jd = _safe_date(emp, "join_date", "date_joined", "start_date")
+    if not jd:
+        return 0.0
+    if as_of < jd:
+        return 0.0
+
+    eol_map = _eol_map_for_emp(session, emp, leave_type)
+    pol = _policy_for_leave_type(session, leave_type)
+
+    full_years, months_in_cur = _months_between(jd, as_of)
+    cur_idx = max(1, full_years + 1)
+
+    def current_year_entitlement(prorated: bool) -> float:
+        base = _eol_amount(eol_map, cur_idx)
+        if prorated:
+            return (months_in_cur / 12.0) * base
+        return base
+
+    # Reset policy
+    if pol["carry_policy"] == "reset":
+        return round(current_year_entitlement(pol["prorated"]), 2)
+
+    # Bring policy, no limit
+    if not pol["carry_limit_enabled"]:
+        total = 0.0
+        for k in range(1, full_years + 1):
+            total += _eol_amount(eol_map, k)
+        total += current_year_entitlement(pol["prorated"])
+        return round(total, 2)
+
+    # Bring policy, limit on
+    L = max(0.0, float(pol["carry_limit"] or 0.0))
+
+    carry_in = 0.0
+    for k in range(1, full_years + 1):
+        A_k = _eol_amount(eol_map, k)
+        sy_start, sy_end = _service_year_period(jd, k)
+        used_k = _used_days_in_window(session, emp.id, leave_type, sy_start, sy_end)
+        opening = A_k + carry_in
+        leftover = max(0.0, opening - used_k)
+        carry_in = leftover if L <= 0 else min(L, leftover)
+
+    A_cur = _eol_amount(eol_map, cur_idx)
+    cur_part = (months_in_cur / 12.0) * A_cur if pol["prorated"] else A_cur
+    total = carry_in + cur_part
     return round(total, 2)
 
 
-# ----------------------------
-# Optional leave tables (names assumed)
-# ----------------------------
+# ---------------------------------------------------------------
+# DDL bootstrap for leave tables in Employee DB
+# ---------------------------------------------------------------
 
-def _ensure_leave_tables(session):
-    return
-
-def _fetch_leave_types(session) -> List[str]:
-    if _table_exists(session, "leave_types"):
-        rows = _safe_rows(session, "SELECT name FROM leave_types WHERE COALESCE(active,1)=1 ORDER BY name")
-        vals = [r[0] for r in rows if r and r[0]]
-        if vals:
-            return vals
+def _ensure_leave_tables(session) -> None:
+    ddl = [
+        """
+        CREATE TABLE IF NOT EXISTS leave_applications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            employee_id INTEGER NOT NULL,
+            leave_type TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            start_half TEXT NOT NULL CHECK (start_half IN ('AM','PM')),
+            end_date   TEXT NOT NULL,
+            end_half   TEXT NOT NULL CHECK (end_half IN ('AM','PM')),
+            used_days  REAL NOT NULL,
+            status     TEXT NOT NULL DEFAULT 'Approved',
+            remarks    TEXT,
+            created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+        );
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_la_emp ON leave_applications(employee_id);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_la_type ON leave_applications(leave_type);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_la_start ON leave_applications(start_date);
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS leave_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            employee_id INTEGER NOT NULL,
+            leave_type TEXT NOT NULL,
+            year INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            days REAL NOT NULL,
+            remarks TEXT,
+            created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+        );
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_ladj_emp ON leave_adjustments(employee_id);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_ladj_year ON leave_adjustments(year);
+        """,
+    ]
     try:
-        rows = session.query(LeaveDefault.leave_type).distinct().order_by(LeaveDefault.leave_type).all()
-        vals = [t[0] for t in rows]
-        return vals or []
+        raw_conn = session.connection().connection
+        cur = raw_conn.cursor()
+        for stmt in ddl:
+            cur.execute(stmt)
+        raw_conn.commit()
     except Exception:
-        return []
+        # silent; do not break UI just because tables are missing
+        pass
 
 
-# ----------------------------
-# leave applications / adjustments I/O
-# ----------------------------
+# ---------------------------------------------------------------
+# UI: Leave module widget
+# ---------------------------------------------------------------
 
-def _insert_application(session,
-                        emp_id: int,
-                        leave_type: str,
-                        start_date: date,
-                        start_half: str,
-                        end_date: date,
-                        end_half: str,
-                        used_days: float,
-                        remarks: str) -> bool:
-    if not _table_exists(session, "leave_applications"):
-        return False
-    try:
-        session.execute("""
-            INSERT INTO leave_applications
-            (account_id, employee_id, leave_type, start_date, start_half,
-             end_date, end_half, used_days, status, remarks, created_at)
-            VALUES
-            (:acc, :eid, :typ, :sd, :sh, :ed, :eh, :used, 'Approved', :rem, CURRENT_TIMESTAMP)
-        """, {
-            "acc": tenant_id(),
-            "eid": int(emp_id),
-            "typ": leave_type,
-            "sd": start_date.isoformat(),
-            "sh": start_half,
-            "ed": end_date.isoformat(),
-            "eh": end_half,
-            "used": float(used_days),
-            "rem": remarks or ""
-        })
-        session.commit()
-        return True
-    except Exception:
-        session.rollback()
-        return False
+@dataclass
+class _AppState:
+    emp_id: Optional[int] = None
+    leave_type: str = "Annual"
 
-def _list_applications(session, year: int) -> List[Tuple]:
-    if not _table_exists(session, "leave_applications"):
-        return []
-    return _safe_rows(session, """
-        SELECT la.id, e.full_name, COALESCE(e.code,''), la.leave_type,
-               la.start_date, la.start_half, la.end_date, la.end_half,
-               COALESCE(la.used_days,0), COALESCE(la.status,'Approved'), COALESCE(la.remarks,'')
-        FROM leave_applications la
-        LEFT JOIN employees e ON e.id = la.employee_id
-        WHERE strftime('%Y', la.start_date)=:y AND la.account_id=:acc
-        ORDER BY la.start_date DESC, la.id DESC
-    """, {"y": str(year), "acc": tenant_id()})
-
-def _insert_adjustment(session,
-                       emp_id: int,
-                       leave_type: str,
-                       when: date,
-                       days: float,
-                       remarks: str) -> bool:
-    if not _table_exists(session, "leave_adjustments"):
-        return False
-    try:
-        session.execute("""
-            INSERT INTO leave_adjustments
-            (account_id, employee_id, leave_type, year, date, days, remarks, created_at)
-            VALUES
-            (:acc, :eid, :typ, :yr, :d, :days, :rem, CURRENT_TIMESTAMP)
-        """, {
-            "acc": tenant_id(),
-            "eid": int(emp_id),
-            "typ": leave_type,
-            "yr": int(when.year),
-            "d": when.isoformat(),
-            "days": float(days),
-            "rem": remarks or ""
-        })
-        session.commit()
-        return True
-    except Exception:
-        session.rollback()
-        return False
-
-def _list_adjustments(session, limit: int = 200) -> List[Tuple]:
-    if not _table_exists(session, "leave_adjustments"):
-        return []
-    return _safe_rows(session, f"""
-        SELECT la.date, e.full_name, COALESCE(e.code,''), la.leave_type, la.days, COALESCE(la.remarks,'')
-        FROM leave_adjustments la
-        LEFT JOIN employees e ON e.id = la.employee_id
-        WHERE la.account_id = :acc
-        ORDER BY la.date DESC, la.rowid DESC
-        LIMIT {int(limit)}
-    """, {"acc": tenant_id()})
-
-
-# ----------------------------
-# UI
-# ----------------------------
 
 class LeaveModuleWidget(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.tabs = QTabWidget(self)
-        v = QVBoxLayout(self)
-        v.addWidget(self.tabs)
+    """Minimal but functional UI wired to the entitlement and used-days logic."""
 
-        self._build_calendar_tab()
-        self._build_details_tab()
-        self._build_summary_tab()
-        self._build_application_tab()
-        self._build_adjustments_tab()
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.session = SessionLocal()
+        _ensure_leave_tables(self.session)
+        self.state = _AppState()
 
-        self._refresh_all()
+        self.tabs = QTabWidget()
+        self._summary_tab = QWidget()
+        self._application_tab = QWidget()
+        self._details_tab = QWidget()
+        self._adjustments_tab = QWidget()
 
-    # -------- Calendar --------
+        self._init_summary_tab()
+        self._init_application_tab()
+        self._init_details_tab()
+        self._init_adjustments_tab()
 
-    def _build_calendar_tab(self):
-        host = QWidget()
-        v = QVBoxLayout(host)
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.tabs)
 
-        top = QHBoxLayout()
-        self.month = QComboBox()
-        self.month.addItems(MONTHS)
-        self.year = QComboBox()
-        self.year.addItems([str(y) for y in range(2024, 2036)])
-        today = date.today()
-        self.month.setCurrentIndex(today.month - 1)
-        self.year.setCurrentText(str(today.year))
+        self.tabs.addTab(self._summary_tab, "Summary")
+        self.tabs.addTab(self._application_tab, "Application")
+        self.tabs.addTab(self._details_tab, "Details")
+        self.tabs.addTab(self._adjustments_tab, "Adjustments")
 
-        self.month.currentTextChanged.connect(lambda _=None: self._reload_calendar())
-        self.month.currentIndexChanged.connect(lambda _=None: self._reload_calendar())
-        self.year.currentTextChanged.connect(lambda _=None: self._reload_calendar())
-        self.year.currentIndexChanged.connect(lambda _=None: self._reload_calendar())
-
-        top.addWidget(QLabel("Month"))
-        top.addWidget(self.month)
-        top.addWidget(QLabel("Year"))
-        top.addWidget(self.year)
-        top.addStretch(1)
-        v.addLayout(top)
-
-        self.cal = QTableWidget(6, 7)
-        self.cal.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.cal.setSelectionMode(QTableWidget.NoSelection)
-        self.cal.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.cal.verticalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.cal.setHorizontalHeaderLabels(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
-        v.addWidget(self.cal, 1)
-
-        self.tabs.addTab(host, "Calendar View")
-
-    def _reload_calendar(self):
-        self._populate_calendar()
-
-    def _populate_calendar(self):
-        for r in range(6):
-            for c in range(7):
-                self.cal.setItem(r, c, QTableWidgetItem(""))
-
-        try:
-            m = self.month.currentIndex() + 1
-            y = int(self.year.currentText())
-        except Exception:
-            return
-
-        first = date(y, m, 1)
-        start_col = first.weekday()
-
-        r, c = 0, start_col
-        d = first
-        while d.month == m:
-            item = QTableWidgetItem(str(d.day))
-            item.setTextAlignment(Qt.AlignTop | Qt.AlignLeft)
-            self.cal.setItem(r, c, item)
-            c += 1
-            if c >= 7:
-                c = 0
-                r += 1
-                if r >= 6:
-                    break
-            d = d + timedelta(days=1)
-
-    # -------- Details --------
-
-    def _build_details_tab(self):
-        host = QWidget()
-        v = QVBoxLayout(host)
+    # ---------------- Summary ----------------
+    def _init_summary_tab(self):
+        w = self._summary_tab
+        layout = QVBoxLayout(w)
 
         top = QHBoxLayout()
-        top.addWidget(QLabel("Year"))
-        self.det_year = QSpinBox()
-        self.det_year.setRange(2000, 2100)
-        self.det_year.setValue(date.today().year)
-        btn = QPushButton("Reload")
-        btn.clicked.connect(self._populate_details)
-        top.addWidget(self.det_year)
+        layout.addLayout(top)
+
+        top.addWidget(QLabel("Year:"))
+        self.cmb_year = QComboBox()
+        cur_year = _today().year
+        years = [str(y) for y in range(cur_year - 3, cur_year + 3)]
+        self.cmb_year.addItems(years)
+        self.cmb_year.setCurrentText(str(cur_year))
+        top.addWidget(self.cmb_year)
+
+        top.addWidget(QLabel("Leave type:"))
+        self.cmb_leave_type_sum = QComboBox()
+        self._populate_leave_types(self.cmb_leave_type_sum)
+        top.addWidget(self.cmb_leave_type_sum)
+
+        self.btn_refresh_sum = QPushButton("Refresh")
+        self.btn_refresh_sum.clicked.connect(self._refresh_summary)
+        top.addWidget(self.btn_refresh_sum)
         top.addStretch(1)
-        top.addWidget(btn)
-        v.addLayout(top)
 
-        self.tbl = QTableWidget(0, 10)
-        self.tbl.setHorizontalHeaderLabels([
-            "ID", "Name", "Code", "Type", "Start", "End", "Used", "Status", "Remarks", " "
-        ])
-        self.tbl.horizontalHeader().setStretchLastSection(True)
-        self.tbl.verticalHeader().setVisible(False)
-        self.tbl.setSelectionBehavior(QTableWidget.SelectRows)
-        self.tbl.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        v.addWidget(self.tbl, 1)
+        self.tbl_summary = QTableWidget(0, 5)
+        self.tbl_summary.setHorizontalHeaderLabels(["Emp ID", "Employee", "Entitlement", "Used", "Balance"])
+        self.tbl_summary.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_summary.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl_summary.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        layout.addWidget(self.tbl_summary)
 
-        self.tabs.addTab(host, "Details")
+        self._refresh_summary()
 
-    def _populate_details(self):
-        yr = int(self.det_year.value())
-        self.tbl.setRowCount(0)
-        with SessionLocal() as s:
-            rows = _list_applications(s, yr)
-        for row in rows:
-            rid, name, code, ltype, sd, sh, ed, eh, used, status, rem = row
-            r = self.tbl.rowCount()
-            self.tbl.insertRow(r)
-            self.tbl.setItem(r, 0, QTableWidgetItem(str(rid)))
-            self.tbl.setItem(r, 1, QTableWidgetItem(name or ""))
-            self.tbl.setItem(r, 2, QTableWidgetItem(code or ""))
-            self.tbl.setItem(r, 3, QTableWidgetItem(ltype or ""))
-            sdisp = f"{sd or ''} {sh or ''}"
-            edisp = f"{ed or ''} {eh or ''}"
-            self.tbl.setItem(r, 4, QTableWidgetItem(sdisp.strip()))
-            self.tbl.setItem(r, 5, QTableWidgetItem(edisp.strip()))
-            self.tbl.setItem(r, 6, QTableWidgetItem(f"{used:.2f}"))
-            self.tbl.setItem(r, 7, QTableWidgetItem(status or ""))
-            self.tbl.setItem(r, 8, QTableWidgetItem(rem or ""))
-            self.tbl.setItem(r, 9, QTableWidgetItem(""))
+    def _refresh_summary(self):
+        session = self.session
+        y = int(self.cmb_year.currentText())
+        lt = self.cmb_leave_type_sum.currentText() or "Annual"
 
-    # -------- Summary --------
-
-    def _build_summary_tab(self):
-        host = QWidget()
-        v = QVBoxLayout(host)
-
-        top = QHBoxLayout()
-        top.addWidget(QLabel("Year"))
-        self.sum_year = QSpinBox()
-        self.sum_year.setRange(2000, 2100)
-        self.sum_year.setValue(date.today().year)
-        self.sum_type = QComboBox()
-        self.sum_type.setEditable(True)
-        self.sum_reload = QPushButton("Reload")
-        self.sum_reload.clicked.connect(self._populate_summary)
-        top.addWidget(self.sum_year)
-        top.addWidget(QLabel("Leave Type"))
-        top.addWidget(self.sum_type)
-        top.addStretch(1)
-        top.addWidget(self.sum_reload)
-        v.addLayout(top)
-
-        self.sum_tbl = QTableWidget(0, 5)
-        self.sum_tbl.setHorizontalHeaderLabels(
-            ["Employee Code", "Employee Name", "Entitlement", "Used", "Balance"]
+        # [NC PATCH] scope employees to tenant
+        rows = (
+            session.query(Employee)
+            .filter(Employee.account_id == tenant_id())
+            .order_by(Employee.id.asc())
+            .all()
         )
-        self.sum_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.sum_tbl.verticalHeader().setVisible(False)
-        v.addWidget(self.sum_tbl, 1)
+        self.tbl_summary.setRowCount(0)
 
-        self.tabs.addTab(host, "Summary")
+        for emp in rows:
+            asof = date(y, 12, 31)
+            ent = _entitlement_asof(session, emp, lt, asof)
+            used = _used_days_total_year(session, emp.id, lt, y, include_adjustments=True)
+            bal = round(ent - used, 2)
 
-    def _populate_summary(self):
-        yr = int(self.sum_year.value())
-        ltype = self.sum_type.currentText().strip() or "Annual Leave"
-        today = date.today()
+            r = self.tbl_summary.rowCount()
+            self.tbl_summary.insertRow(r)
+            self.tbl_summary.setItem(r, 0, QTableWidgetItem(str(emp.id)))
+            name_txt = str(getattr(emp, "full_name", getattr(emp, "name", emp.id)))
+            self.tbl_summary.setItem(r, 1, QTableWidgetItem(name_txt))
+            self.tbl_summary.setItem(r, 2, QTableWidgetItem(f"{ent:.2f}"))
+            self.tbl_summary.setItem(r, 3, QTableWidgetItem(f"{used:.2f}"))
+            self.tbl_summary.setItem(r, 4, QTableWidgetItem(f"{bal:.2f}"))
 
-        with SessionLocal() as s:
-            emps = s.query(Employee).filter(Employee.account_id == tenant_id()).order_by(Employee.full_name).all()
-            self.sum_tbl.setRowCount(0)
-            for e in emps:
-                entitlement, carry_policy, limit_enabled, _limit = _entitlement_asof(s, e, ltype, today)
+    def _populate_leave_types(self, combo: QComboBox):
+        # [NC PATCH] Prefer union of defaults and employee overrides so all types appear
+        s = self.session
+        types = set(
+            t for (t,) in s.query(LeaveDefault.leave_type)
+                          .filter(LeaveDefault.account_id == tenant_id())
+                          .distinct().all()
+        )
+        try:
+            types |= set(
+                t for (t,) in s.query(LeaveEntitlement.leave_type)
+                               .distinct().all()
+            )
+        except Exception:
+            pass
+        if not types:
+            types = {"Annual", "Sick"}
+        combo.clear()
+        combo.addItems(sorted(types))
 
-                # Used column:
-                # - reset: show used in selected year
-                # - bring (unlimited/limit): current-year used shown; prior years already accounted in entitlement via carry/limits
-                used_show = _used_days_total_year(s, e.id, ltype, yr, up_to=today)
+    # ---------------- Application ----------------
+    def _init_application_tab(self):
+        w = self._application_tab
+        form = QFormLayout(w)
 
-                # Balance column:
-                balance = max(0.0, entitlement - (used_show if yr == today.year else 0.0))
-                # if viewing a past year, keep balance=entitlement (snapshot uses today's entitlement; typical use is current year)
+        # employee
+        self.cmb_emp = QComboBox()
+        self._populate_employees(self.cmb_emp)
+        form.addRow("Employee", self.cmb_emp)
 
-                r = self.sum_tbl.rowCount()
-                self.sum_tbl.insertRow(r)
-                row_vals = [e.code or "", e.full_name or "", f"{entitlement:.2f}", f"{used_show:.2f}", f"{balance:.2f}"]
-                for c, val in enumerate(row_vals):
-                    it = QTableWidgetItem(val)
-                    if c >= 2:
-                        it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                    self.sum_tbl.setItem(r, c, it)
+        # leave type
+        self.cmb_leave_type = QComboBox()
+        self._populate_leave_types(self.cmb_leave_type)
+        form.addRow("Leave type", self.cmb_leave_type)
 
-    # -------- Application --------
+        # dates and halves
+        self.de_start = QDateEdit()
+        self.de_start.setCalendarPopup(True)
+        self.de_start.setDate(QDate.currentDate())
+        self.cmb_start_half = QComboBox(); self.cmb_start_half.addItems(["AM", "PM"])
+        hl1 = QHBoxLayout(); hl1.addWidget(self.de_start); hl1.addWidget(self.cmb_start_half)
+        form.addRow("Start", self._wrap(hl1))
 
-    def _build_application_tab(self):
-        host = QWidget()
-        v = QVBoxLayout(host)
+        self.de_end = QDateEdit()
+        self.de_end.setCalendarPopup(True)
+        self.de_end.setDate(QDate.currentDate())
+        self.cmb_end_half = QComboBox(); self.cmb_end_half.addItems(["AM", "PM"])
+        hl2 = QHBoxLayout(); hl2.addWidget(self.de_end); hl2.addWidget(self.cmb_end_half)
+        form.addRow("End", self._wrap(hl2))
 
-        h = QHBoxLayout()
-        self.emp = QComboBox()
-        self._load_employees()
+        # remarks
+        self.txt_remarks = QLineEdit()
+        form.addRow("Remarks", self.txt_remarks)
 
-        self.type = QComboBox()
-        self.type.setEditable(True)
-        self._load_leave_types()
+        # computed used
+        self.ed_used = QLineEdit(); self.ed_used.setReadOnly(True)
+        form.addRow("Total Used", self.ed_used)
 
-        self.s_date = QDateEdit()
-        self.s_date.setCalendarPopup(True)
-        self.s_date.setDate(QDate.currentDate())
+        # actions
+        self.btn_calc = QPushButton("Recalculate")
+        self.btn_submit = QPushButton("Submit")
+        hl3 = QHBoxLayout(); hl3.addWidget(self.btn_calc); hl3.addWidget(self.btn_submit); hl3.addStretch(1)
+        form.addRow(self._wrap(hl3))
 
-        self.s_ampm = QComboBox()
-        self.s_ampm.addItems(["AM", "PM"])
+        # signals
+        self.cmb_emp.currentIndexChanged.connect(self._recalculate_used)
+        self.cmb_leave_type.currentIndexChanged.connect(self._recalculate_used)
+        self.de_start.dateChanged.connect(self._recalculate_used)
+        self.de_end.dateChanged.connect(self._recalculate_used)
+        self.cmb_start_half.currentIndexChanged.connect(self._recalculate_used)
+        self.cmb_end_half.currentIndexChanged.connect(self._recalculate_used)
+        self.btn_calc.clicked.connect(self._recalculate_used)
+        self.btn_submit.clicked.connect(self._submit_application)
 
-        self.e_date = QDateEdit()
-        self.e_date.setCalendarPopup(True)
-        self.e_date.setDate(QDate.currentDate())
+        self._recalculate_used()
 
-        self.e_ampm = QComboBox()
-        self.e_ampm.addItems(["AM", "PM"])
+    def _wrap(self, layout: QHBoxLayout):
+        host = QWidget(); host.setLayout(layout); return host
 
-        self.remarks = QLineEdit()
-        self.remarks.setPlaceholderText("Remarks")
-
-        widgets = [
-            QLabel("Name"), self.emp,
-            QLabel("Type"), self.type,
-            QLabel("Start"), self.s_date, self.s_ampm,
-            QLabel("End"), self.e_date, self.e_ampm,
-            self.remarks
-        ]
-        for w in widgets:
-            h.addWidget(w)
-        h.addStretch(1)
-        v.addLayout(h)
-
-        info = QHBoxLayout()
-        self.lbl_used = QLabel("Total Used: 0.00")
-        self.lbl_balance = QLabel("Balance: –")
-        info.addWidget(self.lbl_used)
-        info.addSpacing(20)
-        info.addWidget(self.lbl_balance)
-        info.addStretch(1)
-        v.addLayout(info)
-
-        act = QHBoxLayout()
-        btn_calc = QPushButton("Recalculate")
-        btn_save = QPushButton("Submit Application")
-        btn_calc.clicked.connect(self._recalculate_used)
-        btn_save.clicked.connect(self._submit_application)
-        act.addStretch(1)
-        act.addWidget(btn_calc)
-        act.addWidget(btn_save)
-        v.addLayout(act)
-
-        self.emp.currentIndexChanged.connect(self._recalculate_used)
-        self.type.currentIndexChanged.connect(self._recalculate_used)
-        self.s_date.dateChanged.connect(self._recalculate_used)
-        self.e_date.dateChanged.connect(self._recalculate_used)
-        self.s_ampm.currentIndexChanged.connect(self._recalculate_used)
-        self.e_ampm.currentIndexChanged.connect(self._recalculate_used)
-
-        self.tabs.addTab(host, "Application")
+    def _populate_employees(self, combo: QComboBox):
+        combo.clear()
+        rows = (
+            self.session.query(Employee)
+            .filter(Employee.account_id == tenant_id())  # [NC PATCH] scope to tenant
+            .order_by(Employee.id.asc())
+            .all()
+        )
+        for emp in rows:
+            combo.addItem(str(getattr(emp, "full_name", getattr(emp, "name", emp.id))), emp.id)
 
     def _recalculate_used(self):
-        emp_id = self.emp.currentData()
-        if not emp_id:
-            self.lbl_used.setText("Total Used: 0.00")
-            self.lbl_balance.setText("Balance: –")
-            return
-
-        s_qd: QDate = self.s_date.date()
-        e_qd: QDate = self.e_date.date()
-        s_dt = date(s_qd.year(), s_qd.month(), s_qd.day())
-        e_dt = date(e_qd.year(), e_qd.month(), e_qd.day())
-        s_half = self.s_ampm.currentText()
-        e_half = self.e_ampm.currentText()
-        ltype = self.type.currentText().strip() or "Annual Leave"
-        yr = s_dt.year
-
-        with SessionLocal() as s:
-            used = _compute_used_days(s, int(emp_id), s_dt, s_half, e_dt, e_half)
-            emp = s.get(Employee, int(emp_id))
-            entitlement, carry_policy, limit_enabled, _limit = _entitlement_asof(s, emp, ltype, date.today()) if emp else (0.0, "reset", False, 0.0)
-            used_show = _used_days_total_year(s, int(emp_id), ltype, yr, up_to=date.today())
-            balance = max(0.0, entitlement - used_show)
-
-        self.lbl_used.setText(f"Total Used: {used:.2f}")
-        self.lbl_balance.setText(f"Balance: {balance:.2f}")
+        try:
+            emp_id = self.cmb_emp.currentData()
+            if emp_id is None:
+                self.ed_used.setText("0")
+                return
+            s = self.de_start.date().toPython()
+            e = self.de_end.date().toPython()
+            sh = self.cmb_start_half.currentText() or "AM"
+            eh = self.cmb_end_half.currentText() or "PM"
+            used = _compute_used_days(self.session, int(emp_id), s, sh, e, eh)
+            self.ed_used.setText(f"{used:.2f}")
+        except Exception:
+            self.ed_used.setText("0")
 
     def _submit_application(self):
-        emp_id = self.emp.currentData()
-        if not emp_id:
-            QMessageBox.warning(self, "Missing", "Select an employee.")
-            return
+        session = self.session
+        try:
+            emp_id = self.cmb_emp.currentData()
+            if emp_id is None:
+                QMessageBox.warning(self, "Missing", "Select employee.")
+                return
+            leave_type = self.cmb_leave_type.currentText() or "Annual"
+            s = self.de_start.date().toPython()
+            e = self.de_end.date().toPython()
+            if e < s:
+                QMessageBox.warning(self, "Invalid", "End date before start date.")
+                return
+            sh = self.cmb_start_half.currentText() or "AM"
+            eh = self.cmb_end_half.currentText() or "PM"
+            used = _compute_used_days(session, int(emp_id), s, sh, e, eh)
 
-        ltype = self.type.currentText().strip() or "Annual Leave"
-        s_qd: QDate = self.s_date.date()
-        e_qd: QDate = self.e_date.date()
-        s_dt = date(s_qd.year(), s_qd.month(), s_qd.day())
-        e_dt = date(e_qd.year(), e_qd.month(), e_qd.day())
-        s_half = self.s_ampm.currentText()
-        e_half = self.e_ampm.currentText()
-        remarks = self.remarks.text().strip()
-
-        with SessionLocal() as s:
-            used = _compute_used_days(s, int(emp_id), s_dt, s_half, e_dt, e_half)
-            ok = _insert_application(
-                s, int(emp_id), ltype, s_dt, s_half, e_dt, e_half, used, remarks
+            _ensure_leave_tables(session)
+            acc = tenant_id()
+            raw = session.connection().connection
+            cur = raw.cursor()
+            cur.execute(
+                """
+                INSERT INTO leave_applications(account_id, employee_id, leave_type, start_date, start_half, end_date, end_half, used_days, status, remarks)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Approved', ?)
+                """,
+                (acc, int(emp_id), leave_type, s.isoformat(), sh, e.isoformat(), eh, float(used), self.txt_remarks.text().strip())
             )
+            raw.commit()
+            QMessageBox.information(self, "Saved", "Leave application recorded.")
+            self._recalculate_used()
+        except Exception as ex:
+            traceback.print_exc()
+            QMessageBox.critical(self, "Error", f"Failed to save.\n{ex}")
 
-        if ok:
-            QMessageBox.information(self, "Saved", "Application saved.")
-            self._refresh_all()
-        else:
-            QMessageBox.information(
-                self, "Note",
-                "Application not written because table 'leave_applications' was not found.\n"
-                "Create the table to persist."
+    # ---------------- Details ----------------
+    def _init_details_tab(self):
+        w = self._details_tab
+        layout = QVBoxLayout(w)
+
+        top = QHBoxLayout(); layout.addLayout(top)
+        top.addWidget(QLabel("Year:"))
+        self.cmb_year_d = QComboBox()
+        cur_year = _today().year
+        self.cmb_year_d.addItems([str(cur_year - 1), str(cur_year), str(cur_year + 1)])
+        self.cmb_year_d.setCurrentText(str(cur_year))
+        top.addWidget(self.cmb_year_d)
+
+        top.addWidget(QLabel("Leave type:"))
+        self.cmb_leave_type_d = QComboBox(); self._populate_leave_types(self.cmb_leave_type_d)
+        top.addWidget(self.cmb_leave_type_d)
+
+        self.btn_refresh_d = QPushButton("Refresh")
+        self.btn_refresh_d.clicked.connect(self._refresh_details)
+        top.addWidget(self.btn_refresh_d)
+        top.addStretch(1)
+
+        self.tbl_details = QTableWidget(0, 8)
+        self.tbl_details.setHorizontalHeaderLabels([
+            "ID", "Emp ID", "Type", "Start", "Start Half", "End", "End Half", "Used"
+        ])
+        self.tbl_details.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_details.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl_details.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        layout.addWidget(self.tbl_details)
+
+        self._refresh_details()
+
+    def _refresh_details(self):
+        session = self.session
+        y = int(self.cmb_year_d.currentText())
+        lt = self.cmb_leave_type_d.currentText() or "Annual"
+        y0, y1 = date(y, 1, 1), date(y, 12, 31)
+
+        self.tbl_details.setRowCount(0)
+        try:
+            acc = tenant_id()
+            raw = session.connection().connection
+            cur = raw.cursor()
+            cur.execute(
+                """
+                SELECT id, employee_id, leave_type, start_date, start_half, end_date, end_half, used_days
+                FROM leave_applications
+                WHERE account_id = ? AND leave_type = ?
+                  AND NOT (date(end_date) < date(?) OR date(start_date) > date(?))
+                ORDER BY date(start_date) ASC
+                """,
+                (acc, lt, y0.isoformat(), y1.isoformat())
             )
+            for row in cur.fetchall():
+                r = self.tbl_details.rowCount(); self.tbl_details.insertRow(r)
+                for c, val in enumerate(row):
+                    self.tbl_details.setItem(r, c, QTableWidgetItem(str(val)))
+        except Exception:
+            # no table yet
+            pass
 
-    # -------- Adjustments --------
+    # ---------------- Adjustments ----------------
+    def _init_adjustments_tab(self):
+        w = self._adjustments_tab
+        form = QFormLayout(w)
 
-    def _build_adjustments_tab(self):
-        host = QWidget()
-        v = QVBoxLayout(host)
+        self.cmb_emp_adj = QComboBox(); self._populate_employees(self.cmb_emp_adj)
+        form.addRow("Employee", self.cmb_emp_adj)
 
-        form = QFormLayout()
-        self.adj_emp = QComboBox(); self._load_employees_into(self.adj_emp)
-        self.adj_date = QDateEdit(); self.adj_date.setCalendarPopup(True); self.adj_date.setDate(QDate.currentDate())
-        self.adj_type = QComboBox(); self._load_leave_types_into(self.adj_type)
-        self.adj_days = QDoubleSpinBox(); self.adj_days.setRange(-365.0, 365.0); self.adj_days.setSingleStep(0.5); self.adj_days.setDecimals(1)
-        self.adj_rem = QLineEdit(); self.adj_rem.setPlaceholderText("Remarks (optional)")
+        self.cmb_leave_type_adj = QComboBox(); self._populate_leave_types(self.cmb_leave_type_adj)
+        form.addRow("Leave type", self.cmb_leave_type_adj)
 
-        form.addRow("Employee", self.adj_emp)
-        form.addRow("Date", self.adj_date)
-        form.addRow("Leave Type", self.adj_type)
-        form.addRow("± Days", self.adj_days)
-        form.addRow("Remarks", self.adj_rem)
-        v.addLayout(form)
+        self.cmb_year_adj = QComboBox()
+        cur_year = _today().year
+        self.cmb_year_adj.addItems([str(cur_year - 1), str(cur_year), str(cur_year + 1)])
+        self.cmb_year_adj.setCurrentText(str(cur_year))
+        form.addRow("Year", self.cmb_year_adj)
 
-        actions = QHBoxLayout()
-        btn_add = QPushButton("Add Adjustment")
-        btn_add.clicked.connect(self._save_adjustment)
-        actions.addStretch(1)
-        actions.addWidget(btn_add)
-        v.addLayout(actions)
+        self.de_adj = QDateEdit(); self.de_adj.setCalendarPopup(True); self.de_adj.setDate(QDate.currentDate())
+        form.addRow("Date", self.de_adj)
 
-        self.adj_tbl = QTableWidget(0, 5)
-        self.adj_tbl.setHorizontalHeaderLabels(["Date", "Employee", "Code", "Type", "± Days"])
-        self.adj_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.adj_tbl.horizontalHeader().setStretchLastSection(True)
-        self.adj_tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        v.addWidget(self.adj_tbl, 1)
+        self.ed_days_adj = QLineEdit(); self.ed_days_adj.setPlaceholderText("e.g. +2 or -1.5")
+        form.addRow("Days", self.ed_days_adj)
 
-        self.tabs.addTab(host, "Adjustments")
+        self.ed_remarks_adj = QLineEdit()
+        form.addRow("Remarks", self.ed_remarks_adj)
 
-    def _reload_adjustments(self):
-        if not hasattr(self, "adj_tbl"):
-            return
-        self.adj_tbl.setRowCount(0)
-        with SessionLocal() as s:
-            rows = _list_adjustments(s, limit=200)
-        for d, name, code, ltype, days, _rem in rows:
-            r = self.adj_tbl.rowCount(); self.adj_tbl.insertRow(r)
-            self.adj_tbl.setItem(r, 0, QTableWidgetItem(str(d or "")))
-            self.adj_tbl.setItem(r, 1, QTableWidgetItem(name or ""))
-            self.adj_tbl.setItem(r, 2, QTableWidgetItem(code or ""))
-            self.adj_tbl.setItem(r, 3, QTableWidgetItem(ltype or ""))
-            self.adj_tbl.setItem(r, 4, QTableWidgetItem(f"{float(days):.1f}"))
+        self.btn_add_adj = QPushButton("Add Adjustment")
+        self.btn_add_adj.clicked.connect(self._save_adjustment)
+        form.addRow(self.btn_add_adj)
 
     def _save_adjustment(self):
-        emp_id = self.adj_emp.currentData()
-        if not emp_id:
-            QMessageBox.warning(self, "Missing", "Select an employee.")
-            return
-        when = self.adj_date.date().toPython()
-        ltype = self.adj_type.currentText().strip() or "Annual Leave"
-        days = float(self.adj_days.value())
-        remarks = self.adj_rem.text().strip()
+        session = self.session
+        try:
+            emp_id = self.cmb_emp_adj.currentData()
+            lt = self.cmb_leave_type_adj.currentText() or "Annual"
+            y = int(self.cmb_year_adj.currentText())
+            d = self.de_adj.date().toPython()
+            days = float(self.ed_days_adj.text().strip())
+            remarks = self.ed_remarks_adj.text().strip()
 
-        with SessionLocal() as s:
-            ok = _insert_adjustment(s, int(emp_id), ltype, when, days, remarks)
-
-        if ok:
-            QMessageBox.information(self, "Saved", "Adjustment saved.")
-            self._populate_summary()
-            self._reload_adjustments()
-        else:
-            QMessageBox.information(
-                self, "Note",
-                "Adjustment not written because table 'leave_adjustments' was not found.\n"
-                "Create the table to persist."
+            _ensure_leave_tables(session)
+            acc = tenant_id()
+            raw = session.connection().connection
+            cur = raw.cursor()
+            cur.execute(
+                """
+                INSERT INTO leave_adjustments(account_id, employee_id, leave_type, year, date, days, remarks)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (acc, int(emp_id), lt, y, d.isoformat(), days, remarks)
             )
-
-    # -------- Data loads --------
-
-    def _load_employees(self):
-        self.emp.clear()
-        with SessionLocal() as s:
-            rows = s.query(Employee).filter(Employee.account_id == tenant_id()).order_by(Employee.full_name).all()
-        for r in rows:
-            self.emp.addItem(f"{r.full_name} ({r.code})", r.id)
-
-    def _load_employees_into(self, combo: QComboBox):
-        combo.clear()
-        with SessionLocal() as s:
-            rows = s.query(Employee).filter(Employee.account_id == tenant_id()).order_by(Employee.full_name).all()
-        for r in rows:
-            combo.addItem(f"{r.full_name} ({r.code})", r.id)
-
-    def _load_leave_types(self):
-        with SessionLocal() as s:
-            types = _fetch_leave_types(s)
-        if types:
-            self.type.clear()
-            self.type.addItems(types)
-
-        self.sum_type.clear()
-        if types:
-            self.sum_type.addItems(types)
-        else:
-            self.sum_type.addItem("Annual Leave")
-
-    def _load_leave_types_into(self, combo: QComboBox):
-        combo.clear()
-        with SessionLocal() as s:
-            types = _fetch_leave_types(s)
-        combo.addItems(types or ["Annual Leave"])
-
-    # -------- Full refresh --------
-
-    def _refresh_all(self):
-        with SessionLocal() as s:
-            _ensure_leave_tables(s)
-
-        self._populate_calendar()
-        self._populate_details()
-        self._populate_summary()
-        self._recalculate_used()
-        self._reload_adjustments()
+            raw.commit()
+            QMessageBox.information(self, "Saved", "Adjustment recorded.")
+        except Exception as ex:
+            traceback.print_exc()
+            QMessageBox.critical(self, "Error", f"Failed to save.\n{ex}")
 
 
-# local util for safe JSON
-def json_load(s: str):
-    import json as _json
-    try:
-        return _json.loads(s)
-    except Exception:
-        return {}
+# ---------------------------------------------------------------
+# Public helpers you may want to import elsewhere
+# ---------------------------------------------------------------
+
+def entitlement_for_year_end(session, emp: Employee, leave_type: str, year: int) -> float:
+    return _entitlement_asof(session, emp, leave_type, date(year, 12, 31))
+
+
+def used_for_year(session, emp_id: int, leave_type: str, year: int, include_adjustments: bool = True) -> float:
+    return _used_days_total_year(session, emp_id, leave_type, year, include_adjustments)
