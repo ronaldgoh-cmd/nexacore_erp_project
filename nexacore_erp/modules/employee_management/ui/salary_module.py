@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import base64
 from calendar import month_name
-from datetime import date
+from datetime import date, datetime
 from typing import List, Tuple, Optional
 
 from PySide6.QtCore import Qt, QMarginsF
@@ -25,6 +25,10 @@ from ....core.models import CompanySettings
 # ---------- globals / helpers ----------
 _VOUCHER_FMT = "SV-{YYYY}{MM}-{EMP}"           # editable from Settings
 _STAMP_B64: Optional[str] = None               # set from Settings → Upload Company Stamp
+
+# CPF two-term offset constant requested: TW minus 500
+# Keep this constant unless future policy changes.
+_CPF_TW_MINUS_OFFSET = 500.0
 
 
 def _format_voucher_code(emp: Employee | None, year: int, month_index_1: int) -> str:
@@ -422,6 +426,18 @@ class SalaryModuleWidget(QWidget):
             except Exception:
                 return None
 
+        # Date parser: prefer DD/MM/YYYY, also accept DD-MM-YYYY, YYYY-MM-DD, YYYY/MM/DD
+        def _rd(x) -> Optional[date]:
+            s = (str(x or "").strip())
+            if not s:
+                return None
+            for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%Y/%m/%d"):
+                try:
+                    return datetime.strptime(s, fmt).date()
+                except Exception:
+                    pass
+            return None
+
         def _age(emp, on_date):
             dob = getattr(emp, "dob", None) or getattr(emp, "date_of_birth", None)
             if not dob:
@@ -439,29 +455,64 @@ class SalaryModuleWidget(QWidget):
                 return 30
             return on_date.year - dob.year - ((on_date.month, on_date.day) < (dob.month, dob.day))
 
+        # ---------- CPF rules read + compute (v2) ----------
+        # Columns:
+        # 0 Age Bracket | 1 Residency | 2 Year (PR) |
+        # 3 Salary From | 4 Salary To |
+        # 5 Total % TW | 6 Total % (TW-500) | 7 EE % TW | 8 EE % (TW-500) |
+        # 9 CPF Total Cap | 10 CPF Employee Cap | 11 Effective From | 12 Notes
         def _cpf_rows():
             rows = []
             tbl = getattr(self, "cpf_tbl", None)
             if not tbl:
                 return rows
 
-            def _rf_local(x):
+            def _rf2(x):
                 try:
                     return float(str(x).replace(",", "").replace("%", "").strip())
                 except Exception:
                     return 0.0
 
+            def _ri2(x):
+                try:
+                    xs = str(x).strip()
+                    return int(xs) if xs else None
+                except Exception:
+                    return None
+
+            def _rd2(x) -> Optional[date]:
+                s = (str(x or "").strip())
+                if not s:
+                    return None
+                for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%Y/%m/%d"):
+                    try:
+                        return datetime.strptime(s, fmt).date()
+                    except Exception:
+                        pass
+                return None
+
             for r in range(tbl.rowCount()):
                 age_br   = (tbl.item(r, 0).text().strip() if tbl.item(r, 0) else "")
                 resid    = (tbl.item(r, 1).text().strip() if tbl.item(r, 1) else "")
-                pr_year  = _ri(tbl.item(r, 2).text() if tbl.item(r, 2) else "")
-                sal_from = _rf_local(tbl.item(r, 3).text() if tbl.item(r, 3) else "0")
-                sal_to   = _rf_local(tbl.item(r, 4).text() if tbl.item(r, 4) else "0")
-                total_pct= _rf_local(tbl.item(r, 5).text() if tbl.item(r, 5) else "0")
-                ee_pct   = _rf_local(tbl.item(r, 6).text() if tbl.item(r, 6) else "0")
-                cap_total= _rf_local(tbl.item(r, 7).text() if tbl.item(r, 7) else "0")  # CPF Total Cap
-                cap_ee   = _rf_local(tbl.item(r, 8).text() if tbl.item(r, 8) else "0")  # CPF Employee Cap
-                rows.append((age_br, resid, pr_year, sal_from, sal_to, total_pct, ee_pct, cap_total, cap_ee))
+                pr_year  = _ri2(tbl.item(r, 2).text() if tbl.item(r, 2) else "")
+                sal_from = _rf2(tbl.item(r, 3).text() if tbl.item(r, 3) else "0")
+                sal_to   = _rf2(tbl.item(r, 4).text() if tbl.item(r, 4) else "0")
+
+                tot_pct_tw   = _rf2(tbl.item(r, 5).text() if tbl.item(r, 5) else "0")
+                tot_pct_tw_m = _rf2(tbl.item(r, 6).text() if tbl.item(r, 6) else "0")
+                ee_pct_tw    = _rf2(tbl.item(r, 7).text() if tbl.item(r, 7) else "0")
+                ee_pct_tw_m  = _rf2(tbl.item(r, 8).text() if tbl.item(r, 8) else "0")
+
+                cap_total = _rf2(tbl.item(r, 9).text() if tbl.item(r, 9) else "0")
+                cap_ee    = _rf2(tbl.item(r,10).text() if tbl.item(r,10) else "0")
+                eff_from  = _rd2(tbl.item(r,11).text() if tbl.item(r,11) else "")
+                # notes in col 12 ignored for calc
+
+                rows.append((
+                    age_br, resid, pr_year, sal_from, sal_to,
+                    tot_pct_tw, tot_pct_tw_m, ee_pct_tw, ee_pct_tw_m,
+                    cap_total, cap_ee, eff_from
+                ))
             return rows
 
         def _match_age(br, a):
@@ -491,30 +542,57 @@ class SalaryModuleWidget(QWidget):
             except Exception:
                 return None
 
-        def _cpf_for(emp, gross, on_date):
+        def _cpf_for(emp, tw, on_date):
             resid_emp = (getattr(emp, "residency", "") or "").strip().lower()
             a = _age(emp, on_date)
             pry = _employee_pr_year(emp)
-            for age_br, resid_row, pr_year, sal_lo, sal_hi, total_pct, ee_pct, cap_total, cap_ee in _cpf_rows():
+
+            for (
+                age_br, resid_row, pr_year, sal_lo, sal_hi,
+                tot_pct_tw, tot_pct_tw_m, ee_pct_tw, ee_pct_tw_m,
+                cap_total, cap_ee, eff_from
+            ) in _cpf_rows():
+
                 if resid_row.strip().lower() != resid_emp:
+                    continue
+                if eff_from and eff_from > on_date:
                     continue
                 if not _match_age(age_br, a):
                     continue
-                if sal_lo and gross < sal_lo:
+                if sal_lo and tw < sal_lo:
                     continue
-                if sal_hi and gross > sal_hi:
+                if sal_hi and tw > sal_hi:
                     continue
                 if pr_year is not None:
                     if pry is None or pry != pr_year:
                         continue
-                base_total = min(gross, cap_total) if cap_total else gross
-                base_ee    = min(gross, cap_ee) if cap_ee else gross
-                ee  = round(base_ee * (ee_pct / 100.0), 2)
-                tot = round(base_total * (total_pct / 100.0), 2)
-                er  = round(max(tot - ee, 0.0), 2)
-                return ee, er, round(ee + er, 2)
+
+                # Bases with caps
+                base_total = min(tw, cap_total) if cap_total else tw
+                base_ee    = min(tw, cap_ee) if cap_ee else tw
+
+                # Two-term structure:
+                # Total  = (tot_pct_tw%) * TW + (tot_pct_tw_m%) * max(TW - 500, 0)
+                # EE     = (ee_pct_tw%)  * TW + (ee_pct_tw_m%)  * max(TW - 500, 0)
+                # ER     = max(Total - EE, 0)
+                off = _CPF_TW_MINUS_OFFSET
+
+                total_term1 = base_total * (tot_pct_tw / 100.0)
+                total_term2 = max(base_total - off, 0.0) * (tot_pct_tw_m / 100.0)
+                total_val   = round(total_term1 + total_term2, 2)
+
+                ee_term1 = base_ee * (ee_pct_tw / 100.0)
+                ee_term2 = max(base_ee - off, 0.0) * (ee_pct_tw_m / 100.0)
+                ee_val   = round(ee_term1 + ee_term2, 2)
+
+                er_val = round(max(total_val - ee_val, 0.0), 2)
+                return ee_val, er_val, round(ee_val + er_val, 2)
+
             return 0.0, 0.0, 0.0
 
+        # ---------- SHG ----------
+        # New columns:
+        # 0 SHG | 1 Income From | 2 Income To | 3 Contribution Type | 4 Contribution Value | 5 Effective From | 6 Notes
         def _load_shg_race_map() -> dict:
             try:
                 with SessionLocal() as s:
@@ -540,11 +618,13 @@ class SalaryModuleWidget(QWidget):
             if not tbl:
                 return rows
             for r in range(tbl.rowCount()):
-                shg = (tbl.item(r, 0).text().strip().upper() if tbl.item(r, 0) else "")
-                lo = _rf(tbl.item(r, 1).text() if tbl.item(r, 1) else "0")
-                hi = _rf(tbl.item(r, 2).text() if tbl.item(r, 2) else "0")
-                val = _rf(tbl.item(r, 3).text() if tbl.item(r, 3) else "0")
-                rows.append((shg, lo, hi, val))
+                shg  = (tbl.item(r, 0).text().strip().upper() if tbl.item(r, 0) else "")
+                lo   = _rf(tbl.item(r, 1).text() if tbl.item(r, 1) else "0")
+                hi   = _rf(tbl.item(r, 2).text() if tbl.item(r, 2) else "0")
+                ctyp = (tbl.item(r, 3).text().strip().lower() if tbl.item(r, 3) else "")
+                cval = _rf(tbl.item(r, 4).text() if tbl.item(r, 4) else "0")
+                eff  = _rd(tbl.item(r, 5).text() if tbl.item(r, 5) else "")
+                rows.append((shg, lo, hi, ctyp, cval, eff))
             return rows
 
         def _map_race_to_shg(race_str: str) -> str:
@@ -563,36 +643,50 @@ class SalaryModuleWidget(QWidget):
                 return "ECF"
             return "CDAC"
 
-        def _shg_for(emp, total):
+        def _shg_for(emp, tw, on_date):
             shg_name = _map_race_to_shg(getattr(emp, "race", "") or "")
-            for shg, lo, hi, val in _shg_rows():
-                if shg == shg_name and (lo <= total <= (hi or total)):
-                    return float(val)
+            for shg, lo, hi, ctyp, cval, eff in _shg_rows():
+                if shg != shg_name:
+                    continue
+                if eff and eff > on_date:
+                    continue
+                if not (lo <= tw <= (hi or tw)):
+                    continue
+                if ctyp == "percent":
+                    return round(tw * (cval / 100.0), 2)
+                # default flat
+                return float(cval)
             return 0.0
 
+        # ---------- SDL ----------
+        # New columns:
+        # 0 Salary From | 1 Salary To | 2 Rate Type | 3 Rate Value | 4 Effective From | 5 Notes
         def _sdl_rows():
             rows = []
             tbl = getattr(self, "sdl_tbl", None)
             if not tbl:
                 return rows
             for r in range(tbl.rowCount()):
-                lo = _rf(tbl.item(r, 0).text() if tbl.item(r, 0) else "0")
-                hi = _rf(tbl.item(r, 1).text() if tbl.item(r, 1) else "0")
-                rule = (tbl.item(r, 2).text().strip() if tbl.item(r, 2) else "")
-                rows.append((lo, hi, rule))
+                lo   = _rf(tbl.item(r, 0).text() if tbl.item(r, 0) else "0")
+                hi   = _rf(tbl.item(r, 1).text() if tbl.item(r, 1) else "0")
+                rtyp = (tbl.item(r, 2).text().strip().lower() if tbl.item(r, 2) else "")
+                rval = _rf(tbl.item(r, 3).text() if tbl.item(r, 3) else "0")
+                eff  = _rd(tbl.item(r, 4).text() if tbl.item(r, 4) else "")
+                rows.append((lo, hi, rtyp, rval, eff))
             return rows
 
-        def _sdl_for(total):
-            for lo, hi, rule in _sdl_rows():
-                if lo <= total <= (hi or total):
-                    r = rule.lower()
-                    if r.startswith("flat:"):
+        def _sdl_for(tw, on_date):
+            for lo, hi, rtyp, rval, eff in _sdl_rows():
+                if eff and eff > on_date:
+                    continue
+                if lo <= tw <= (hi or tw):
+                    if rtyp == "flat":
                         try:
-                            return float(r.split(":", 1)[1].strip())
+                            return float(rval)
                         except Exception:
                             return 0.0
-                    pct = _rf(r)
-                    return round(total * (pct / 100.0), 2)
+                    # percent
+                    return round(tw * (float(rval) / 100.0), 2)
             return 0.0
 
         # ---------- DB bootstrapping ----------
@@ -734,8 +828,8 @@ class SalaryModuleWidget(QWidget):
             ot_r, ot_h, pt_r, pt_h = f(5), f(6), f(7), f(8)
             levy = f(10)
             gross = basic + com + inc + allw + (ot_r * ot_h) + (pt_r * pt_h)
-            shg = _shg_for(emp_obj, gross)
-            sdl = _sdl_for(gross)
+            shg = _shg_for(emp_obj, gross, on_date)
+            sdl = _sdl_for(gross, on_date)
             ee, er, cpf_t = _cpf_for(emp_obj, gross, on_date)
             ee_c = ee + shg
             er_c = er + sdl + levy
@@ -1164,33 +1258,54 @@ class SalaryModuleWidget(QWidget):
     def _build_settings_tab(self):
         from sqlalchemy import text
         import csv
+        from PySide6.QtWidgets import QMessageBox
 
+        # ---------- durable schema for rules (v2) ----------
         def _ensure_settings_tables():
             with SessionLocal() as s:
+                # Legacy shells remain; v2 tables hold what the UI edits.
                 s.execute(text("""
-                CREATE TABLE IF NOT EXISTS cpf_rules(
+                CREATE TABLE IF NOT EXISTS cpf_rules_v2(
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  account_id TEXT NOT NULL,
                   age_bracket TEXT NOT NULL,
                   residency   TEXT NOT NULL,
-                  ee_pct      REAL NOT NULL DEFAULT 0,
-                  er_pct      REAL NOT NULL DEFAULT 0,
-                  wage_ceiling REAL NOT NULL DEFAULT 0
+                  pr_year     INTEGER,
+                  salary_from REAL,
+                  salary_to   REAL,
+                  total_pct_tw REAL,
+                  total_pct_tw_minus REAL,
+                  ee_pct_tw REAL,
+                  ee_pct_tw_minus REAL,
+                  cpf_total_cap REAL,
+                  cpf_employee_cap REAL,
+                  effective_from TEXT,
+                  notes TEXT
                 )"""))
                 s.execute(text("""
-                CREATE TABLE IF NOT EXISTS shg_rules(
+                CREATE TABLE IF NOT EXISTS shg_rules_v2(
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  race TEXT NOT NULL,
-                  income_from REAL NOT NULL,
-                  income_to   REAL NOT NULL,
-                  contribution REAL NOT NULL
+                  account_id TEXT NOT NULL,
+                  shg TEXT NOT NULL,
+                  income_from REAL,
+                  income_to   REAL,
+                  contribution_type TEXT,
+                  contribution_value REAL,
+                  effective_from TEXT,
+                  notes TEXT
                 )"""))
                 s.execute(text("""
-                CREATE TABLE IF NOT EXISTS sdl_rules(
+                CREATE TABLE IF NOT EXISTS sdl_rules_v2(
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  salary_from REAL NOT NULL,
-                  salary_to   REAL NOT NULL,
-                  rule TEXT NOT NULL
+                  account_id TEXT NOT NULL,
+                  salary_from REAL,
+                  salary_to   REAL,
+                  rate_type TEXT,
+                  rate_value REAL,
+                  effective_from TEXT,
+                  notes TEXT
                 )"""))
+                # Race map table used elsewhere
                 s.execute(text("""
                 CREATE TABLE IF NOT EXISTS shg_race_map(
                   account_id TEXT NOT NULL,
@@ -1201,6 +1316,7 @@ class SalaryModuleWidget(QWidget):
                 s.commit()
         _ensure_settings_tables()
 
+        # ---------- helpers ----------
         def _mk_table(headers):
             t = QTableWidget(0, len(headers))
             t.setHorizontalHeaderLabels(headers)
@@ -1214,6 +1330,13 @@ class SalaryModuleWidget(QWidget):
                 return float(str(x).replace(",", "").replace("%", "").strip())
             except:
                 return 0.0
+
+        def _ri(x):
+            try:
+                xs = str(x).strip()
+                return int(xs) if xs else None
+            except:
+                return None
 
         def _csv_export(tbl, headers, title):
             path, _ = QFileDialog.getSaveFileName(self, f"Export {title}", f"{title}.csv", "CSV Files (*.csv)")
@@ -1232,7 +1355,6 @@ class SalaryModuleWidget(QWidget):
             if not rows: return
             hdr = [h.strip() for h in rows[0]]
             if [h.lower() for h in hdr] != [h.lower() for h in headers]:
-                from PySide6.QtWidgets import QMessageBox
                 QMessageBox.warning(self, "Import", f"Header mismatch.\nExpected: {headers}\nGot: {hdr}")
                 return
             tbl.setRowCount(0)
@@ -1247,7 +1369,6 @@ class SalaryModuleWidget(QWidget):
             if not path: return
             with open(path, "w", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow(headers)
-            from PySide6.QtWidgets import QMessageBox
             QMessageBox.information(self, "Template", f"Created: {path}")
 
         def _list_defined_races():
@@ -1333,6 +1454,7 @@ class SalaryModuleWidget(QWidget):
         v.setSpacing(12)
         inner.setContentsMargins(12, 12, 12, 12)
 
+        # ---------- Voucher box ----------
         voucher_box = QGroupBox("Voucher Settings")
         f_v = QFormLayout(voucher_box)
 
@@ -1445,15 +1567,16 @@ class SalaryModuleWidget(QWidget):
         _preview_code()
         _refresh_stamp_preview_from_b64(self._company_stamp_b64)
 
-        # ---------- CPF ----------
+        # ---------- CPF (v2 two-term structure) ----------
         cpf_headers = [
             "Age Bracket", "Residency", "Year (PR)",
             "Salary From", "Salary To",
-            "Total CPF %", "Employee CPF %", "CPF Total Cap", "CPF Employee Cap"
+            "Total % TW", "Total % (TW-500)", "EE % TW", "EE % (TW-500)",
+            "CPF Total Cap", "CPF Employee Cap", "Effective From", "Notes"
         ]
         cpf_box = QGroupBox("CPF Rules")
         cpf_v = QVBoxLayout(cpf_box)
-        cpf_hint = QLabel("Leave caps blank or 0 for uncapped. Employee cap limits EE base only. Total cap limits overall CPF base.")
+        cpf_hint = QLabel("Two-term: X%×TW + Y%×max(TW-500,0). Enter X and Y. Caps optional. Effective From in DD/MM/YYYY.")
         cpf_hint.setStyleSheet("color:#6b7280;")
         cpf_v.addWidget(cpf_hint)
         self.cpf_tbl = _mk_table(cpf_headers)
@@ -1462,24 +1585,18 @@ class SalaryModuleWidget(QWidget):
         b_add = QPushButton("Add"); b_del = QPushButton("Delete")
         b_imp = QPushButton("Import CSV"); b_exp = QPushButton("Export CSV")
         b_tpl = QPushButton("CSV Template"); b_val = QPushButton("Validate")
+        b_del_all = QPushButton("Delete all")
         for b in (b_add, b_del): row.addWidget(b)
         row.addStretch(1)
-        for b in (b_imp, b_exp, b_tpl, b_val): row.addWidget(b)
+        for b in (b_imp, b_exp, b_tpl, b_val, b_del_all): row.addWidget(b)
         cpf_v.addLayout(row)
-        b_add.clicked.connect(lambda: self.cpf_tbl.insertRow(self.cpf_tbl.rowCount()))
-        b_del.clicked.connect(lambda: [self.cpf_tbl.removeRow(r) for r in sorted({ix.row() for ix in self.cpf_tbl.selectedIndexes()}, reverse=True)])
-        b_imp.clicked.connect(lambda: _csv_import(self.cpf_tbl, cpf_headers, "CPF"))
-        b_exp.clicked.connect(lambda: _csv_export(self.cpf_tbl, cpf_headers, "CPF"))
-        b_tpl.clicked.connect(lambda: _csv_template(cpf_headers, "CPF"))
-        b_val.clicked.connect(lambda: QMessageBox.information(self, "CPF Validate",
-                        "OK" if not _validate_cpf(self.cpf_tbl) else "\n".join(_validate_cpf(self.cpf_tbl))))
         v.addWidget(cpf_box)
 
-        # ---------- SHG ----------
-        shg_headers = ["SHG", "Salary From", "Salary To", "Contribution"]
+        # ---------- SHG (v2) ----------
+        shg_headers = ["SHG", "Income From", "Income To", "Contribution Type", "Contribution Value", "Effective From", "Notes"]
         shg_box = QGroupBox("SHG Rules")
         shg_v = QVBoxLayout(shg_box)
-        shg_hint = QLabel("SHG: MBMF, CDAC, SINDA, ECF. Contribution is flat amount.")
+        shg_hint = QLabel("Type: flat or percent. Value is number only. Effective From in DD/MM/YYYY. Race→SHG map controls which table applies.")
         shg_hint.setStyleSheet("color:#6b7280;")
         shg_v.addWidget(shg_hint)
         self.shg_tbl = _mk_table(shg_headers)
@@ -1489,10 +1606,208 @@ class SalaryModuleWidget(QWidget):
         s_imp = QPushButton("Import CSV"); s_exp = QPushButton("Export CSV")
         s_tpl = QPushButton("CSV Template"); s_val = QPushButton("Validate")
         s_map = QPushButton("Manage Race→SHG")
+        s_del_all = QPushButton("Delete all")
         for b in (s_add, s_del): row2.addWidget(b)
         row2.addStretch(1)
-        for b in (s_imp, s_exp, s_tpl, s_val, s_map): row2.addWidget(b)
+        for b in (s_imp, s_exp, s_tpl, s_val, s_map, s_del_all): row2.addWidget(b)
         shg_v.addLayout(row2)
+        v.addWidget(shg_box)
+
+        # ---------- SDL (v2) ----------
+        sdl_headers = ["Salary From", "Salary To", "Rate Type", "Rate Value", "Effective From", "Notes"]
+        sdl_box = QGroupBox("SDL Rules")
+        sdl_v = QVBoxLayout(sdl_box)
+        sdl_hint = QLabel("Rate Type: percent or flat. If percent, enter 0.25 for 0.25%. Blank 'To' = no upper limit. Effective From in DD/MM/YYYY.")
+        sdl_hint.setStyleSheet("color:#6b7280;")
+        sdl_v.addWidget(sdl_hint)
+        self.sdl_tbl = _mk_table(sdl_headers)
+        sdl_v.addWidget(self.sdl_tbl)
+        row3 = QHBoxLayout()
+        d_add = QPushButton("Add"); d_del = QPushButton("Delete")
+        d_imp = QPushButton("Import CSV"); d_exp = QPushButton("Export CSV")
+        d_tpl = QPushButton("CSV Template"); d_val = QPushButton("Validate")
+        d_del_all = QPushButton("Delete all")
+        for b in (d_add, d_del): row3.addWidget(b)
+        row3.addStretch(1)
+        for b in (d_imp, d_exp, d_tpl, d_val, d_del_all): row3.addWidget(b)
+        sdl_v.addLayout(row3)
+        v.addWidget(sdl_box)
+
+        # ---------- persistence: save / load / delete-all ----------
+        acct = lambda: str(tenant_id())
+
+        def _save_cpf_rules():
+            with SessionLocal() as s:
+                s.execute(text("DELETE FROM cpf_rules_v2 WHERE account_id=:a"), {"a": acct()})
+                for r in range(self.cpf_tbl.rowCount()):
+                    g = lambda c: (self.cpf_tbl.item(r, c).text().strip() if self.cpf_tbl.item(r, c) else "")
+                    s.execute(text("""
+                    INSERT INTO cpf_rules_v2(
+                      account_id, age_bracket, residency, pr_year, salary_from, salary_to,
+                      total_pct_tw, total_pct_tw_minus, ee_pct_tw, ee_pct_tw_minus,
+                      cpf_total_cap, cpf_employee_cap, effective_from, notes
+                    ) VALUES(
+                      :a,:age,:res,:yr,:sf,:st,:ttw,:ttwm,:eetw,:eetwm,:ct,:ce,:eff,:notes
+                    )"""), {
+                        "a": acct(),
+                        "age": g(0), "res": g(1), "yr": _ri(g(2)),
+                        "sf": _rf(g(3)), "st": _rf(g(4)),
+                        "ttw": _rf(g(5)), "ttwm": _rf(g(6)),
+                        "eetw": _rf(g(7)), "eetwm": _rf(g(8)),
+                        "ct": _rf(g(9)), "ce": _rf(g(10)),
+                        "eff": g(11), "notes": g(12)
+                    })
+                s.commit()
+
+        def _load_cpf_rules():
+            self.cpf_tbl.setRowCount(0)
+            with SessionLocal() as s:
+                rows = s.execute(text("""
+                SELECT age_bracket,residency,pr_year,salary_from,salary_to,
+                       total_pct_tw,total_pct_tw_minus,ee_pct_tw,ee_pct_tw_minus,
+                       cpf_total_cap,cpf_employee_cap,effective_from,notes
+                FROM cpf_rules_v2 WHERE account_id=:a ORDER BY id ASC
+                """), {"a": acct()}).fetchall()
+            for row in rows:
+                r = self.cpf_tbl.rowCount()
+                self.cpf_tbl.insertRow(r)
+                vals = [
+                    row.age_bracket or "", row.residency or "",
+                    "" if row.pr_year is None else str(row.pr_year),
+                    f"{(row.salary_from or 0):g}", f"{(row.salary_to or 0):g}",
+                    f"{(row.total_pct_tw or 0):g}", f"{(row.total_pct_tw_minus or 0):g}",
+                    f"{(row.ee_pct_tw or 0):g}", f"{(row.ee_pct_tw_minus or 0):g}",
+                    f"{(row.cpf_total_cap or 0):g}", f"{(row.cpf_employee_cap or 0):g}",
+                    row.effective_from or "", row.notes or ""
+                ]
+                for c, v in enumerate(vals):
+                    self.cpf_tbl.setItem(r, c, QTableWidgetItem(v))
+
+        def _save_shg_rules():
+            with SessionLocal() as s:
+                s.execute(text("DELETE FROM shg_rules_v2 WHERE account_id=:a"), {"a": acct()})
+                for r in range(self.shg_tbl.rowCount()):
+                    g = lambda c: (self.shg_tbl.item(r, c).text().strip() if self.shg_tbl.item(r, c) else "")
+                    s.execute(text("""
+                    INSERT INTO shg_rules_v2(
+                      account_id, shg, income_from, income_to,
+                      contribution_type, contribution_value, effective_from, notes
+                    ) VALUES(
+                      :a,:shg,:f,:t,:typ,:val,:eff,:notes
+                    )"""), {
+                        "a": acct(),
+                        "shg": g(0).upper(),
+                        "f": _rf(g(1)), "t": _rf(g(2)),
+                        "typ": g(3).lower(), "val": _rf(g(4)),
+                        "eff": g(5), "notes": g(6)
+                    })
+                s.commit()
+
+        def _load_shg_rules():
+            self.shg_tbl.setRowCount(0)
+            with SessionLocal() as s:
+                rows = s.execute(text("""
+                SELECT shg,income_from,income_to,contribution_type,contribution_value,effective_from,notes
+                FROM shg_rules_v2 WHERE account_id=:a ORDER BY id ASC
+                """), {"a": acct()}).fetchall()
+            for row in rows:
+                r = self.shg_tbl.rowCount()
+                self.shg_tbl.insertRow(r)
+                vals = [
+                    row.shg or "", f"{(row.income_from or 0):g}", f"{(row.income_to or 0):g}",
+                    row.contribution_type or "", f"{(row.contribution_value or 0):g}",
+                    row.effective_from or "", row.notes or ""
+                ]
+                for c, v in enumerate(vals):
+                    self.shg_tbl.setItem(r, c, QTableWidgetItem(v))
+
+        def _save_sdl_rules():
+            with SessionLocal() as s:
+                s.execute(text("DELETE FROM sdl_rules_v2 WHERE account_id=:a"), {"a": acct()})
+                for r in range(self.sdl_tbl.rowCount()):
+                    g = lambda c: (self.sdl_tbl.item(r, c).text().strip() if self.sdl_tbl.item(r, c) else "")
+                    s.execute(text("""
+                    INSERT INTO sdl_rules_v2(
+                      account_id, salary_from, salary_to, rate_type, rate_value, effective_from, notes
+                    ) VALUES(
+                      :a,:f,:t,:typ,:val,:eff,:notes
+                    )"""), {
+                        "a": acct(),
+                        "f": _rf(g(0)), "t": _rf(g(1)),
+                        "typ": g(2).lower(), "val": _rf(g(3)),
+                        "eff": g(4), "notes": g(5)
+                    })
+                s.commit()
+
+        def _load_sdl_rules():
+            self.sdl_tbl.setRowCount(0)
+            with SessionLocal() as s:
+                rows = s.execute(text("""
+                SELECT salary_from,salary_to,rate_type,rate_value,effective_from,notes
+                FROM sdl_rules_v2 WHERE account_id=:a ORDER BY id ASC
+                """), {"a": acct()}).fetchall()
+            for row in rows:
+                r = self.sdl_tbl.rowCount()
+                self.sdl_tbl.insertRow(r)
+                vals = [
+                    f"{(row.salary_from or 0):g}", f"{(row.salary_to or 0):g}",
+                    row.rate_type or "", f"{(row.rate_value or 0):g}",
+                    row.effective_from or "", row.notes or ""
+                ]
+                for c, v in enumerate(vals):
+                    self.sdl_tbl.setItem(r, c, QTableWidgetItem(v))
+
+        def _delete_all_cpf():
+            if QMessageBox.question(self, "Delete all", "Delete all CPF rules?") == QMessageBox.Yes:
+                with SessionLocal() as s:
+                    s.execute(text("DELETE FROM cpf_rules_v2 WHERE account_id=:a"), {"a": acct()})
+                    s.commit()
+                self.cpf_tbl.setRowCount(0)
+
+        def _delete_all_shg():
+            if QMessageBox.question(self, "Delete all", "Delete all SHG rules?") == QMessageBox.Yes:
+                with SessionLocal() as s:
+                    s.execute(text("DELETE FROM shg_rules_v2 WHERE account_id=:a"), {"a": acct()})
+                    s.commit()
+                self.shg_tbl.setRowCount(0)
+
+        def _delete_all_sdl():
+            if QMessageBox.question(self, "Delete all", "Delete all SDL rules?") == QMessageBox.Yes:
+                with SessionLocal() as s:
+                    s.execute(text("DELETE FROM sdl_rules_v2 WHERE account_id=:a"), {"a": acct()})
+                    s.commit()
+                self.sdl_tbl.setRowCount(0)
+
+        # ---------- wire buttons ----------
+        b_add.clicked.connect(lambda: self.cpf_tbl.insertRow(self.cpf_tbl.rowCount()))
+        b_del.clicked.connect(lambda: [self.cpf_tbl.removeRow(r) for r in sorted({ix.row() for ix in self.cpf_tbl.selectedIndexes()}, reverse=True)])
+        b_imp.clicked.connect(lambda: _csv_import(self.cpf_tbl, cpf_headers, "CPF"))
+        b_exp.clicked.connect(lambda: _csv_export(self.cpf_tbl, cpf_headers, "CPF"))
+        b_tpl.clicked.connect(lambda: _csv_template(cpf_headers, "CPF"))
+        def _on_validate_cpf():
+            errs = _validate_cpf(self.cpf_tbl)
+            if errs:
+                QMessageBox.information(self, "CPF Validate", "\n".join(errs))
+            else:
+                _save_cpf_rules()
+                QMessageBox.information(self, "CPF Validate", "OK. Saved.")
+        b_val.clicked.connect(_on_validate_cpf)
+        b_del_all.clicked.connect(_delete_all_cpf)
+
+        s_add.clicked.connect(lambda: self.shg_tbl.insertRow(self.shg_tbl.rowCount()))
+        s_del.clicked.connect(lambda: [self.shg_tbl.removeRow(r) for r in sorted({ix.row() for ix in self.shg_tbl.selectedIndexes()}, reverse=True)])
+        s_imp.clicked.connect(lambda: _csv_import(self.shg_tbl, shg_headers, "SHG"))
+        s_exp.clicked.connect(lambda: _csv_export(self.shg_tbl, shg_headers, "SHG"))
+        s_tpl.clicked.connect(lambda: _csv_template(shg_headers, "SHG"))
+        def _on_validate_shg():
+            errs = _validate_shg(self.shg_tbl)
+            if errs:
+                QMessageBox.information(self, "SHG Validate", "\n".join(errs))
+            else:
+                _save_shg_rules()
+                QMessageBox.information(self, "SHG Validate", "OK. Saved.")
+        s_val.clicked.connect(_on_validate_shg)
+        s_del_all.clicked.connect(_delete_all_shg)
 
         def _open_race_shg_map():
             dlg = QDialog(self)
@@ -1518,7 +1833,7 @@ class SalaryModuleWidget(QWidget):
                                  {"a": str(tenant_id())}).fetchall()
                 existing = { (r.race or "").strip().lower(): (r.shg or "").strip().upper() for r in rows }
 
-            options = ["MBMF", "CDAC", "SINDA", "ECF"]
+            options = ["MBMF", "CDAC", "SINDA", "ECF", "OTHERS"]  # added OTHERS
             for rname in races:
                 r = tbl.rowCount()
                 tbl.insertRow(r)
@@ -1548,7 +1863,6 @@ class SalaryModuleWidget(QWidget):
                             ON CONFLICT(account_id, race) DO UPDATE SET shg=excluded.shg
                         """), {"a": str(tenant_id()), "r": race, "s": shg})
                     s.commit()
-                from PySide6.QtWidgets import QMessageBox
                 QMessageBox.information(dlg, "Race→SHG", "Saved.")
                 dlg.accept()
 
@@ -1557,41 +1871,27 @@ class SalaryModuleWidget(QWidget):
             dlg.resize(560, 440)
             dlg.exec()
 
-        s_add.clicked.connect(lambda: self.shg_tbl.insertRow(self.shg_tbl.rowCount()))
-        s_del.clicked.connect(lambda: [self.shg_tbl.removeRow(r) for r in sorted({ix.row() for ix in self.shg_tbl.selectedIndexes()}, reverse=True)])
-        s_imp.clicked.connect(lambda: _csv_import(self.shg_tbl, shg_headers, "SHG"))
-        s_exp.clicked.connect(lambda: _csv_export(self.shg_tbl, shg_headers, "SHG"))
-        s_tpl.clicked.connect(lambda: _csv_template(shg_headers, "SHG"))
-        s_val.clicked.connect(lambda: QMessageBox.information(self, "SHG Validate",
-                        "OK" if not _validate_shg(self.shg_tbl) else "\n".join(_validate_shg(self.shg_tbl))))
         s_map.clicked.connect(_open_race_shg_map)
-        v.addWidget(shg_box)
 
-        # ---------- SDL ----------
-        sdl_headers = ["Salary From", "Salary To", "Rate / Formula"]
-        sdl_box = QGroupBox("SDL Rules")
-        sdl_v = QVBoxLayout(sdl_box)
-        sdl_hint = QLabel("Use percent like 0.25% or 0.25. Or flat like 'flat: 11.25'.")
-        sdl_hint.setStyleSheet("color:#6b7280;")
-        sdl_v.addWidget(sdl_hint)
-        self.sdl_tbl = _mk_table(sdl_headers)
-        sdl_v.addWidget(self.sdl_tbl)
-        row3 = QHBoxLayout()
-        d_add = QPushButton("Add"); d_del = QPushButton("Delete")
-        d_imp = QPushButton("Import CSV"); d_exp = QPushButton("Export CSV")
-        d_tpl = QPushButton("CSV Template"); d_val = QPushButton("Validate")
-        for b in (d_add, d_del): row3.addWidget(b)
-        row3.addStretch(1)
-        for b in (d_imp, d_exp, d_tpl, d_val): row3.addWidget(b)
-        sdl_v.addLayout(row3)
         d_add.clicked.connect(lambda: self.sdl_tbl.insertRow(self.sdl_tbl.rowCount()))
         d_del.clicked.connect(lambda: [self.sdl_tbl.removeRow(r) for r in sorted({ix.row() for ix in self.sdl_tbl.selectedIndexes()}, reverse=True)])
         d_imp.clicked.connect(lambda: _csv_import(self.sdl_tbl, sdl_headers, "SDL"))
         d_exp.clicked.connect(lambda: _csv_export(self.sdl_tbl, sdl_headers, "SDL"))
         d_tpl.clicked.connect(lambda: _csv_template(sdl_headers, "SDL"))
-        d_val.clicked.connect(lambda: QMessageBox.information(self, "SDL Validate",
-                        "OK" if not _validate_sdl(self.sdl_tbl) else "\n".join(_validate_sdl(self.sdl_tbl))))
-        v.addWidget(sdl_box)
+        def _on_validate_sdl():
+            errs = _validate_sdl(self.sdl_tbl)
+            if errs:
+                QMessageBox.information(self, "SDL Validate", "\n".join(errs))
+            else:
+                _save_sdl_rules()
+                QMessageBox.information(self, "SDL Validate", "OK. Saved.")
+        d_val.clicked.connect(_on_validate_sdl)
+        d_del_all.clicked.connect(_delete_all_sdl)
+
+        # ---------- initial load from DB ----------
+        _load_cpf_rules()
+        _load_shg_rules()
+        _load_sdl_rules()
 
         sa.setWidget(inner)
         self.tabs.addTab(sa, "Settings")
@@ -1622,20 +1922,36 @@ def _validate_cpf(tbl):
         except:
             return None
 
+    # Date validator: prefer DD/MM/YYYY, also accept DD-MM-YYYY, YYYY-MM-DD, YYYY/MM/DD
+    def rd(x):
+        s = (str(x or "").strip())
+        if not s:
+            return None
+        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                datetime.strptime(s, fmt)
+                return True
+            except Exception:
+                pass
+        return False
+
     for r in range(tbl.rowCount()):
         age = (tbl.item(r, 0).text().strip() if tbl.item(r, 0) else "")
         resid = (tbl.item(r, 1).text().strip() if tbl.item(r, 1) else "")
         yr = (tbl.item(r, 2).text().strip() if tbl.item(r, 2) else "")
         sal_from = (tbl.item(r, 3).text().strip() if tbl.item(r, 3) else "0")
         sal_to   = (tbl.item(r, 4).text().strip() if tbl.item(r, 4) else "0")
-        total_pct = (tbl.item(r, 5).text().strip() if tbl.item(r, 5) else "0")
-        ee_pct    = (tbl.item(r, 6).text().strip() if tbl.item(r, 6) else "0")
-        cap_total = (tbl.item(r, 7).text().strip() if tbl.item(r, 7) else "0")
-        cap_ee    = (tbl.item(r, 8).text().strip() if tbl.item(r, 8) else "0")
+
+        t_tw  = (tbl.item(r, 5).text().strip() if tbl.item(r, 5) else "0")
+        t_m   = (tbl.item(r, 6).text().strip() if tbl.item(r, 6) else "0")
+        ee_tw = (tbl.item(r, 7).text().strip() if tbl.item(r, 7) else "0")
+        ee_m  = (tbl.item(r, 8).text().strip() if tbl.item(r, 8) else "0")
+
+        cap_total = (tbl.item(r, 9).text().strip() if tbl.item(r, 9) else "0")
+        cap_ee    = (tbl.item(r,10).text().strip() if tbl.item(r,10) else "0")
+        eff_from  = (tbl.item(r,11).text().strip() if tbl.item(r,11) else "")
 
         s_from = rf(sal_from); s_to = rf(sal_to)
-        t_pct = rf(total_pct); e_pct = rf(ee_pct)
-        ct = rf(cap_total); ce = rf(cap_ee)
         y = ri(yr)
 
         if not age or not resid: errs.append(f"Row {r + 1}: missing Age/Residency")
@@ -1643,11 +1959,19 @@ def _validate_cpf(tbl):
             errs.append(f"Row {r + 1}: age bracket format")
         if s_from < 0 or s_to < 0: errs.append(f"Row {r + 1}: negative salary range")
         if s_to and s_to < s_from: errs.append(f"Row {r + 1}: Salary To < Salary From")
-        if t_pct < 0 or e_pct < 0: errs.append(f"Row {r + 1}: negative %")
-        if e_pct > t_pct: errs.append(f"Row {r + 1}: Employee % > Total %")
+
+        for lab, val in (("Total % TW", t_tw), ("Total % (TW-500)", t_m), ("EE % TW", ee_tw), ("EE % (TW-500)", ee_m)):
+            try:
+                _ = rf(val)
+                if rf(val) < 0: errs.append(f"Row {r + 1}: {lab} negative")
+            except Exception:
+                errs.append(f"Row {r + 1}: {lab} invalid")
+
+        ct = rf(cap_total); ce = rf(cap_ee)
         if y is not None and y < 0: errs.append(f"Row {r + 1}: Year(PR) invalid")
         if ct < 0: errs.append(f"Row {r + 1}: CPF Total Cap cannot be negative")
         if ce < 0: errs.append(f"Row {r + 1}: CPF Employee Cap cannot be negative")
+        if eff_from and not rd(eff_from): errs.append(f"Row {r + 1}: Effective From date must be DD/MM/YYYY")
     return errs
 
 
@@ -1658,15 +1982,35 @@ def _validate_shg(tbl):
             return float(str(x).replace(",", "").strip())
         except Exception:
             return 0.0
-    valid = {"MBMF", "CDAC", "SINDA", "ECF"}
+
+    def rd(x):
+        s = (str(x or "").strip())
+        if not s:
+            return None
+        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                datetime.strptime(s, fmt)
+                return True
+            except Exception:
+                pass
+        return False
+
+    valid_shg = {"MBMF", "CDAC", "SINDA", "ECF", "OTHERS"}  # OTHERS added
+    valid_typ = {"flat", "percent"}
+
     for r in range(tbl.rowCount()):
         shg = (tbl.item(r, 0).text().strip().upper() if tbl.item(r, 0) else "")
         lo = rf(tbl.item(r, 1).text() if tbl.item(r, 1) else "0")
         hi = rf(tbl.item(r, 2).text() if tbl.item(r, 2) else "0")
-        val = rf(tbl.item(r, 3).text() if tbl.item(r, 3) else "0")
-        if shg not in valid: errs.append(f"Row {r + 1}: SHG must be one of {sorted(valid)}")
-        if lo < 0 or hi < 0 or val < 0: errs.append(f"Row {r + 1}: negative number")
-        if hi and hi < lo: errs.append(f"Row {r + 1}: Salary To < Salary From")
+        ctyp = (tbl.item(r, 3).text().strip().lower() if tbl.item(r, 3) else "")
+        cval = rf(tbl.item(r, 4).text() if tbl.item(r, 4) else "0")
+        eff  = (tbl.item(r, 5).text().strip() if tbl.item(r, 5) else "")
+
+        if shg not in valid_shg: errs.append(f"Row {r + 1}: SHG must be one of {sorted(valid_shg)}")
+        if lo < 0 or hi < 0 or cval < 0: errs.append(f"Row {r + 1}: negative number")
+        if hi and hi < lo: errs.append(f"Row {r + 1}: Income To < Income From")
+        if ctyp not in valid_typ: errs.append(f"Row {r + 1}: Contribution Type must be flat or percent")
+        if eff and not rd(eff): errs.append(f"Row {r + 1}: Effective From date must be DD/MM/YYYY")
     return errs
 
 
@@ -1677,22 +2021,30 @@ def _validate_sdl(tbl):
             return float(str(x).replace(",", "").replace("%", "").strip())
         except Exception:
             return 0.0
+
+    def rd(x):
+        s = (str(x or "").strip())
+        if not s:
+            return None
+        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                datetime.strptime(s, fmt)
+                return True
+            except Exception:
+                pass
+        return False
+
+    valid_typ = {"flat", "percent"}
+
     for r in range(tbl.rowCount()):
         lo = rf(tbl.item(r, 0).text() if tbl.item(r, 0) else "0")
         hi = rf(tbl.item(r, 1).text() if tbl.item(r, 1) else "0")
-        rule = (tbl.item(r, 2).text().strip().lower() if tbl.item(r, 2) else "")
+        rtyp = (tbl.item(r, 2).text().strip().lower() if tbl.item(r, 2) else "")
+        rval = rf(tbl.item(r, 3).text() if tbl.item(r, 3) else "0")
+        eff  = (tbl.item(r, 4).text().strip() if tbl.item(r, 4) else "")
+
         if hi and hi < lo: errs.append(f"Row {r + 1}: Salary To < Salary From")
-        if not rule:
-            errs.append(f"Row {r + 1}: missing rule")
-            continue
-        if rule.startswith("flat:"):
-            try:
-                float(rule.split(":", 1)[1].strip())
-            except Exception:
-                errs.append(f"Row {r + 1}: flat format")
-        else:
-            try:
-                _ = rf(rule)
-            except Exception:
-                errs.append(f"Row {r + 1}: percent format")
+        if rtyp not in valid_typ: errs.append(f"Row {r + 1}: Rate Type must be flat or percent")
+        if rval < 0: errs.append(f"Row {r + 1}: Rate Value cannot be negative")
+        if eff and not rd(eff): errs.append(f"Row {r + 1}: Effective From date must be DD/MM/YYYY")
     return errs
