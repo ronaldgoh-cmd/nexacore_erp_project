@@ -55,17 +55,21 @@ def _img_data_uri(png_bytes: bytes | None, fallback_label: str = "Logo") -> str:
 
 
 def _stamp_img_html(cs: CompanySettings | None) -> str:
-    b64 = _STAMP_B64
-    if not b64:
-        raw = getattr(cs, "stamp", None)
-        if raw:
-            b64 = base64.b64encode(raw).decode("ascii")
+    # prefer DB stamp if present; else built-in
+    raw = getattr(cs, "stamp", None) if cs else None
+    b64 = base64.b64encode(raw).decode("ascii") if raw else (_STAMP_B64 or "")
     if not b64:
         return ""
+    # force 128×128 regardless of original file size
     return (
-        "<img src=\"data:image/png;base64," + b64 +
-        "\" style=\"max-height:120px;max-width:220px;opacity:0.75;object-fit:contain;\"/>"
+        "<img src=\"data:image/png;base64," + b64 + "\" "
+        "width=\"128\" height=\"128\" "
+        "style=\"display:inline-block;width:128px;height:128px;object-fit:contain;opacity:0.85;vertical-align:bottom;\"/>"
     )
+
+
+
+
 
 
 def _month_names() -> List[str]:
@@ -323,16 +327,26 @@ def _voucher_html(
     <!-- Signatures + Stamp -->
     <table cellpadding="0" cellspacing="0" width="100%" style="margin-top:22px">
       <tr>
+        <!-- Left: stamp above Prepared by -->
         <td style="width:50%;vertical-align:bottom">
+          <div style="margin-bottom:6px">{stamp_html}</div>
           <div style="font-weight:bold">Prepared by: {html.escape(company_name)}</div>
         </td>
-        <td style="width:50%;text-align:right;vertical-align:bottom">
-          {stamp_html}
-          <div>Employee Acknowledgement</div>
-          <div style="height:1px;background:#e5e7eb;margin-top:18px"></div>
+    
+        <!-- Right: signature line then label -->
+        <td style="width:50%;vertical-align:bottom;text-align:right">
+          <div style="display:inline-block;width:70%;text-align:center">
+            <hr style="width:60%;margin:0 auto 6px auto;height:1px;border:none;background:#111;">
+            <div>Employee Acknowledgement</div>
+          </div>
         </td>
+
       </tr>
     </table>
+
+
+
+
 
   </div>
 </body>
