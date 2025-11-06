@@ -85,10 +85,13 @@ def _employees() -> List[Tuple[int, str, str]]:
 
 def _company() -> CompanySettings | None:
     try:
-        with SessionLocal() as s:
+        # use main database session for company settings
+        from ....core.database import SessionLocal as MainSession
+        with MainSession() as s:
             return s.query(CompanySettings).first()
     except Exception:
         return None
+
 
 
 def _voucher_html(
