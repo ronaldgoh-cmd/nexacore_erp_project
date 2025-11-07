@@ -429,11 +429,11 @@ class SalaryModuleWidget(QWidget):
             self.tbl.setItem(r, 6, QTableWidgetItem(f"{(e.parttime_rate or 0.0):.2f}"))
 
     def _build_salary_review_tab(self):
-        from calendar import monthrange
+        from calendar import monthrange, month_name
         from PySide6.QtWidgets import (
             QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
             QTableWidget, QTableWidgetItem, QDialog, QListWidget, QListWidgetItem,
-            QDialogButtonBox, QMessageBox
+            QDialogButtonBox, QMessageBox, QHeaderView
         )
         from PySide6.QtCore import Qt, QRect
         from PySide6.QtGui import QPainter, QColor, QPen, QBrush
@@ -444,6 +444,9 @@ class SalaryModuleWidget(QWidget):
         # ----------------
         # helpers
         # ----------------
+        def _month_names():
+            return [month_name[i] for i in range(1, 13)]
+
         def _rf(x):
             # robust number parse; strips $, commas, text, % etc
             s = str(x or "")
@@ -617,25 +620,11 @@ class SalaryModuleWidget(QWidget):
                     s.execute(text("""
                                    CREATE TABLE IF NOT EXISTS shg_race_map
                                    (
-                                       account_id
-                                       TEXT
-                                       NOT
-                                       NULL,
-                                       race
-                                       TEXT
-                                       NOT
-                                       NULL,
-                                       shg
-                                       TEXT
-                                       NOT
-                                       NULL,
-                                       PRIMARY
-                                       KEY
-                                   (
-                                       account_id,
-                                       race
-                                   )
-                                       );
+                                       account_id TEXT NOT NULL,
+                                       race       TEXT NOT NULL,
+                                       shg        TEXT NOT NULL,
+                                       PRIMARY KEY (account_id, race)
+                                   );
                                    """))
                     s.commit()
                     rows = s.execute(text("SELECT race, shg FROM shg_race_map WHERE account_id=:a"),
@@ -723,135 +712,41 @@ class SalaryModuleWidget(QWidget):
                 s.execute(text("""
                                CREATE TABLE IF NOT EXISTS payroll_batches
                                (
-                                   id
-                                   INTEGER
-                                   PRIMARY
-                                   KEY
-                                   AUTOINCREMENT,
-                                   year
-                                   INTEGER
-                                   NOT
-                                   NULL,
-                                   month
-                                   INTEGER
-                                   NOT
-                                   NULL,
-                                   status
-                                   TEXT
-                                   NOT
-                                   NULL
-                                   DEFAULT
-                                   'Draft',
-                                   total_basic
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   total_er
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   grand_total
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   created_at
-                                   TEXT
-                                   DEFAULT
-                                   CURRENT_TIMESTAMP
+                                   id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                                   year         INTEGER NOT NULL,
+                                   month        INTEGER NOT NULL,
+                                   status       TEXT    NOT NULL DEFAULT 'Draft',
+                                   total_basic  REAL    DEFAULT 0,
+                                   total_er     REAL    DEFAULT 0,
+                                   grand_total  REAL    DEFAULT 0,
+                                   created_at   TEXT    DEFAULT CURRENT_TIMESTAMP
                                );
                                """))
                 s.execute(text("""
                                CREATE TABLE IF NOT EXISTS payroll_batch_lines
                                (
-                                   id
-                                   INTEGER
-                                   PRIMARY
-                                   KEY
-                                   AUTOINCREMENT,
-                                   batch_id
-                                   INTEGER
-                                   NOT
-                                   NULL,
-                                   employee_id
-                                   INTEGER
-                                   NOT
-                                   NULL,
-                                   basic_salary
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   commission
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   incentives
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   allowance
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   overtime_rate
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   overtime_hours
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   part_time_rate
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   part_time_hours
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   levy
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   advance
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   shg
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   sdl
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   cpf_emp
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   cpf_er
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   cpf_total
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   line_total
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   ee_contrib
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   er_contrib
-                                   REAL
-                                   DEFAULT
-                                   0,
-                                   total_cash
-                                   REAL
-                                   DEFAULT
-                                   0
+                                   id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                                   batch_id        INTEGER NOT NULL,
+                                   employee_id     INTEGER NOT NULL,
+                                   basic_salary    REAL    DEFAULT 0,
+                                   commission      REAL    DEFAULT 0,
+                                   incentives      REAL    DEFAULT 0,
+                                   allowance       REAL    DEFAULT 0,
+                                   overtime_rate   REAL    DEFAULT 0,
+                                   overtime_hours  REAL    DEFAULT 0,
+                                   part_time_rate  REAL    DEFAULT 0,
+                                   part_time_hours REAL    DEFAULT 0,
+                                   levy            REAL    DEFAULT 0,
+                                   advance         REAL    DEFAULT 0,
+                                   shg             REAL    DEFAULT 0,
+                                   sdl             REAL    DEFAULT 0,
+                                   cpf_emp         REAL    DEFAULT 0,
+                                   cpf_er          REAL    DEFAULT 0,
+                                   cpf_total       REAL    DEFAULT 0,
+                                   line_total      REAL    DEFAULT 0,
+                                   ee_contrib      REAL    DEFAULT 0,
+                                   er_contrib      REAL    DEFAULT 0,
+                                   total_cash      REAL    DEFAULT 0
                                );
                                """))
                 try:
@@ -864,25 +759,11 @@ class SalaryModuleWidget(QWidget):
                 s.execute(text("""
                                CREATE TABLE IF NOT EXISTS shg_race_map
                                (
-                                   account_id
-                                   TEXT
-                                   NOT
-                                   NULL,
-                                   race
-                                   TEXT
-                                   NOT
-                                   NULL,
-                                   shg
-                                   TEXT
-                                   NOT
-                                   NULL,
-                                   PRIMARY
-                                   KEY
-                               (
-                                   account_id,
-                                   race
-                               )
-                                   );
+                                   account_id TEXT NOT NULL,
+                                   race       TEXT NOT NULL,
+                                   shg        TEXT NOT NULL,
+                                   PRIMARY KEY (account_id, race)
+                               );
                                """))
                 s.commit()
 
@@ -946,12 +827,25 @@ class SalaryModuleWidget(QWidget):
 
         v.addLayout(toolbar)
 
-        tbl = QTableWidget(0, 6)
-        tbl.setHorizontalHeaderLabels(["Year", "Month", "Total Basic", "Total Employer", "Grand Total", "Status"])
+        # Columns per request: Month first, then Year, requested totals, then Status
+        batch_headers = [
+            "Month", "Year",
+            "Total", "Advance", "Employer SHG", "SDL",
+            "CPF EE", "CPF ER", "CPF Total",
+            "Levy", "EE Contribution", "ER Contribution", "Cash Payout",
+            "Status"
+        ]
+        tbl = QTableWidget(0, len(batch_headers))
+        tbl.setHorizontalHeaderLabels(batch_headers)
         tbl.setEditTriggers(QTableWidget.NoEditTriggers)
         tbl.setSelectionBehavior(QTableWidget.SelectRows)
         tbl.setSelectionMode(QTableWidget.SingleSelection)
         tbl.setSortingEnabled(True)
+
+        hdr = tbl.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeToContents)  # auto-size to contents
+        hdr.setStretchLastSection(False)
+        hdr.setDefaultAlignment(Qt.AlignCenter | Qt.AlignVCenter)  # center header text
         v.addWidget(tbl, 1)
 
         self.tabs.addTab(host, "Salary Review")
@@ -959,36 +853,78 @@ class SalaryModuleWidget(QWidget):
         # ---------- data ops ----------
         _ensure_tables()
 
+        def _money(x) -> str:
+            try:
+                return f"${float(x or 0):,.2f}"
+            except Exception:
+                return "$0.00"
+
+        def _add_centered(r, c, text, batch_id=None):
+            it = QTableWidgetItem(text)
+            it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+            it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+            if batch_id is not None:
+                it.setData(Qt.UserRole, int(batch_id))
+            tbl.setItem(r, c, it)
+
         def _load_batches():
             tbl.setRowCount(0)
             with SessionLocal() as s:
                 rows = s.execute(text("""
-                                      SELECT id, year, month, total_basic, total_er, grand_total, status
-                                      FROM payroll_batches
-                                      ORDER BY year DESC, month DESC, id DESC
-                                      """)).fetchall()
-            for _id, y, m, tb, ter, gt, st in rows:
-                r = tbl.rowCount()
-                tbl.insertRow(r)
+                    SELECT id, year, month, status
+                    FROM payroll_batches
+                    ORDER BY year DESC, month DESC, id DESC
+                """)).fetchall()
 
-                def item(val):
-                    it = QTableWidgetItem(f"{val}")
-                    it.setData(Qt.UserRole, _id)
-                    return it
+                for b in rows:
+                    sums = s.execute(text("""
+                        SELECT
+                            SUM(line_total)  AS t_total,
+                            SUM(advance)     AS t_advance,
+                            SUM(shg)         AS t_shg,        -- Employer SHG
+                            SUM(sdl)         AS t_sdl,
+                            SUM(cpf_emp)     AS t_cpf_ee,
+                            SUM(cpf_er)      AS t_cpf_er,
+                            SUM(cpf_total)   AS t_cpf_total,
+                            SUM(levy)        AS t_levy,
+                            SUM(ee_contrib)  AS t_ee_contrib,
+                            SUM(er_contrib)  AS t_er_contrib,
+                            SUM(total_cash)  AS t_cash
+                        FROM payroll_batch_lines
+                        WHERE batch_id = :bid
+                    """), {"bid": int(b.id)}).fetchone()
 
-                tbl.setItem(r, 0, item(y))
-                tbl.setItem(r, 1, item(m))
-                tbl.setItem(r, 2, QTableWidgetItem(f"${(tb or 0):,.2f}"))
-                tbl.setItem(r, 3, QTableWidgetItem(f"${(ter or 0):,.2f}"))
-                tbl.setItem(r, 4, QTableWidgetItem(f"${(gt or 0):,.2f}"))
-                tbl.setItem(r, 5, QTableWidgetItem(st or "Draft"))
+                    r = tbl.rowCount()
+                    tbl.insertRow(r)
+
+                    # Month name first, then Year
+                    m_name = month_name[int(b.month)] if 1 <= int(b.month) <= 12 else str(b.month)
+                    _add_centered(r, 0, m_name, batch_id=b.id)
+                    _add_centered(r, 1, str(b.year))
+
+                    # Totals in requested order
+                    _add_centered(r, 2, _money(getattr(sums, "t_total", 0)))
+                    _add_centered(r, 3, _money(getattr(sums, "t_advance", 0)))
+                    _add_centered(r, 4, _money(getattr(sums, "t_shg", 0)))  # Employer SHG
+                    _add_centered(r, 5, _money(getattr(sums, "t_sdl", 0)))
+                    _add_centered(r, 6, _money(getattr(sums, "t_cpf_ee", 0)))
+                    _add_centered(r, 7, _money(getattr(sums, "t_cpf_er", 0)))
+                    _add_centered(r, 8, _money(getattr(sums, "t_cpf_total", 0)))
+                    _add_centered(r, 9, _money(getattr(sums, "t_levy", 0)))
+                    _add_centered(r, 10, _money(getattr(sums, "t_ee_contrib", 0)))
+                    _add_centered(r, 11, _money(getattr(sums, "t_er_contrib", 0)))
+                    _add_centered(r, 12, _money(getattr(sums, "t_cash", 0)))
+
+                    _add_centered(r, 13, b.status or "Draft")
 
         _load_batches()
 
         def _selected_batch_id():
             r = tbl.currentRow()
-            if r < 0: return None
-            return tbl.item(r, 0).data(Qt.UserRole)
+            if r < 0:
+                return None
+            it = tbl.item(r, 0)
+            return it.data(Qt.UserRole) if it else None
 
         # ---- grid columns ----
         COLS = [
@@ -1324,17 +1260,16 @@ class SalaryModuleWidget(QWidget):
                                                                        levy, advance, shg, sdl, cpf_emp, cpf_er,
                                                                        cpf_total,
                                                                        line_total, ee_contrib, er_contrib, total_cash)
-                                       VALUES (:b, :e, :ba, :co, :in, :al, :otr, :oth, :ptr, :pth, :lev, :adv, :shg,
-                                               :sdl,
+                                       VALUES (:b, :e, :ba, :co, :in, :al, :otr, :oth, :ptr, :pth, :lev, :adv, :shg, :sdl,
                                                :ee, :er, :cpt, :lt, :eec, :erc, :cash)
                                        """), {
-                                      "b": batch_id_local, "e": int(emp.id),
-                                      "ba": basic, "co": comm, "in": inc, "al": allw,
-                                      "otr": ot_r, "oth": ot_h, "ptr": pt_r, "pth": pt_h,
-                                      "lev": levy, "adv": adv, "shg": shg, "sdl": sdl,
-                                      "ee": cpf_ee, "er": cpf_er, "cpt": cpf_t,
-                                      "lt": tot, "eec": ee_c, "erc": er_c, "cash": cash
-                                  })
+                            "b": batch_id_local, "e": int(emp.id),
+                            "ba": basic, "co": comm, "in": inc, "al": allw,
+                            "otr": ot_r, "oth": ot_h, "ptr": pt_r, "pth": pt_h,
+                            "lev": levy, "adv": adv, "shg": shg, "sdl": sdl,
+                            "ee": cpf_ee, "er": cpf_er, "cpt": cpf_t,
+                            "lt": tot, "eec": ee_c, "erc": er_c, "cash": cash
+                        })
                     s.commit()
                 return batch_id_local
 
