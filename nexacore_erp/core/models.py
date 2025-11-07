@@ -28,8 +28,9 @@ class CompanySettings(Base):
     detail1: Mapped[str] = mapped_column(String, default="")
     detail2: Mapped[str] = mapped_column(String, default="")
     logo: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    version: Mapped[str] = mapped_column(String, default="")   # added
-    about: Mapped[str] = mapped_column(String, default="")     # added
+    stamp: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)  # persisted company stamp
+    version: Mapped[str] = mapped_column(String, default="")
+    about: Mapped[str] = mapped_column(String, default="")
 
 class ModuleState(Base):
     __tablename__ = "module_state"

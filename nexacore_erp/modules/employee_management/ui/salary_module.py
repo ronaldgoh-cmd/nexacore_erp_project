@@ -16,15 +16,14 @@ from PySide6.QtWidgets import (
     QDialogButtonBox
 )
 
-from ....core.database import get_employee_session as SessionLocal
+from ....core.database import get_employee_session as SessionLocal, get_main_session as MainSession
 from ....core.tenant import id as tenant_id
 from ..models import Employee
 from ....core.models import CompanySettings
 
-
 # ---------- globals / helpers ----------
-_VOUCHER_FMT = "SV-{YYYY}{MM}-{EMP}"           # editable from Settings
-_STAMP_B64: Optional[str] = None               # set from Settings → Upload Company Stamp
+_VOUCHER_FMT = "SV-{YYYY}{MM}-{EMP}"  # editable from Settings
+_STAMP_B64: Optional[str] = None  # set from Settings → Upload Company Stamp
 
 # CPF two-term offset constant requested: TW minus 500
 # Keep this constant unless future policy changes.
@@ -36,8 +35,8 @@ def _format_voucher_code(emp: Employee | None, year: int, month_index_1: int) ->
     emp_code = (getattr(emp, "code", "") or "EMP001")
     mm = f"{month_index_1:02d}"
     return (tpl.replace("{YYYY}", str(year))
-               .replace("{MM}", mm)
-               .replace("{EMP}", emp_code))
+            .replace("{MM}", mm)
+            .replace("{EMP}", emp_code))
 
 
 def _img_data_uri(png_bytes: bytes | None, fallback_label: str = "Logo") -> str:
@@ -54,22 +53,32 @@ def _img_data_uri(png_bytes: bytes | None, fallback_label: str = "Logo") -> str:
     )
 
 
+def _detect_mime(data: bytes | None) -> str:
+    if not data:
+        return "image/png"
+    b0 = data[:8]
+    if b0.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if b0.startswith(b"\xff\xd8"):
+        return "image/jpeg"
+    if b0.startswith(b"GIF8"):
+        return "image/gif"
+    return "application/octet-stream"
+
+
 def _stamp_img_html(cs: CompanySettings | None) -> str:
-    # prefer DB stamp if present; else built-in
     raw = getattr(cs, "stamp", None) if cs else None
-    b64 = base64.b64encode(raw).decode("ascii") if raw else (_STAMP_B64 or "")
-    if not b64:
+    if not raw and _STAMP_B64:
+        raw = base64.b64decode(_STAMP_B64)
+    if not raw:
         return ""
-    # force 128×128 regardless of original file size
+    mime = _detect_mime(raw)
+    b64 = base64.b64encode(raw).decode("ascii")
     return (
-        "<img src=\"data:image/png;base64," + b64 + "\" "
-        "width=\"128\" height=\"128\" "
-        "style=\"display:inline-block;width:128px;height:128px;object-fit:contain;opacity:0.85;vertical-align:bottom;\"/>"
+        f'<img src="data:{mime};base64,{b64}" '
+        'width="128" height="128" '
+        'style="display:inline-block;width:128px;height:128px;object-fit:contain;opacity:0.85;vertical-align:bottom;"/>'
     )
-
-
-
-
 
 
 def _month_names() -> List[str]:
@@ -88,22 +97,22 @@ def _employees() -> List[Tuple[int, str, str]]:
 
 
 def _company() -> CompanySettings | None:
-    try:
-        # use main database session for company settings
-        from ....core.database import SessionLocal as MainSession
-        with MainSession() as s:
-            return s.query(CompanySettings).first()
-    except Exception:
-        return None
-
+    with MainSession() as s:
+        row = s.query(CompanySettings).filter(CompanySettings.account_id == str(tenant_id())).first()
+        if not row:
+            row = CompanySettings(account_id=str(tenant_id()))
+            s.add(row)
+            s.commit()
+            s.refresh(row)
+        return row
 
 
 def _voucher_html(
-    cs: CompanySettings | None,
-    emp: Employee | None,
-    year: int,
-    month_index_1: int,
-    line: Optional[dict] = None,
+        cs: CompanySettings | None,
+        emp: Employee | None,
+        year: int,
+        month_index_1: int,
+        line: Optional[dict] = None,
 ) -> str:
     import html
     # --- company ---
@@ -116,49 +125,50 @@ def _voucher_html(
     # --- employee snapshot ---
     emp_name = getattr(emp, "full_name", "") or "—"
     emp_code = getattr(emp, "code", "") or "—"
-    id_no    = getattr(emp, "identification_number", "") or getattr(emp, "nric", "") or "—"
-    bank     = getattr(emp, "bank", "") or "—"
-    acct     = getattr(emp, "bank_account", "") or "—"
+    id_no = getattr(emp, "identification_number", "") or getattr(emp, "nric", "") or "—"
+    bank = getattr(emp, "bank", "") or "—"
+    acct = getattr(emp, "bank_account", "") or "—"
 
     # --- figures (defaults from employee fields) ---
-    basic   = float(getattr(emp, "basic_salary", 0.0) or 0.0)
-    comm    = float(getattr(emp, "commission", 0.0) or 0.0)
-    incent  = float(getattr(emp, "incentives", 0.0) or 0.0)
-    allow   = float(getattr(emp, "allowance", 0.0) or 0.0)
+    basic = float(getattr(emp, "basic_salary", 0.0) or 0.0)
+    comm = float(getattr(emp, "commission", 0.0) or 0.0)
+    incent = float(getattr(emp, "incentives", 0.0) or 0.0)
+    allow = float(getattr(emp, "allowance", 0.0) or 0.0)
 
     pt_rate = float(getattr(emp, "parttime_rate", 0.0) or 0.0)
-    pt_hrs  = float(getattr(emp, "part_time_hours", 0.0) or 0.0)
+    pt_hrs = float(getattr(emp, "part_time_hours", 0.0) or 0.0)
 
     ot_rate = float(getattr(emp, "overtime_rate", 0.0) or 0.0)
-    ot_hrs  = float(getattr(emp, "overtime_hours", 0.0) or 0.0)
+    ot_hrs = float(getattr(emp, "overtime_hours", 0.0) or 0.0)
 
     advance = float(getattr(emp, "advance", 0.0) or 0.0)
-    shg     = float(getattr(emp, "shg", 0.0) or 0.0)
+    shg = float(getattr(emp, "shg", 0.0) or 0.0)
 
     cpf_emp = float(getattr(emp, "cpf_employee", 0.0) or 0.0)
-    cpf_er  = float(getattr(emp, "cpf_employer", 0.0) or 0.0)
+    cpf_er = float(getattr(emp, "cpf_employer", 0.0) or 0.0)
 
-    sdl  = float(getattr(emp, "sdl", 0.0) or 0.0)
+    sdl = float(getattr(emp, "sdl", 0.0) or 0.0)
     levy = float(getattr(emp, "levy", 0.0) or 0.0)
 
     # --- override from batch line if available ---
     if line:
-        basic   = float(line.get("basic_salary", basic) or 0.0)
-        comm    = float(line.get("commission", comm) or 0.0)
-        incent  = float(line.get("incentives", incent) or 0.0)
-        allow   = float(line.get("allowance", allow) or 0.0)
+        basic = float(line.get("basic_salary", basic) or 0.0)
+        comm = float(line.get("commission", comm) or 0.0)
+        incent = float(line.get("incentives", incent) or 0.0)
+        allow = float(line.get("allowance", allow) or 0.0)
         ot_rate = float(line.get("overtime_rate", ot_rate) or 0.0)
-        ot_hrs  = float(line.get("overtime_hours", ot_hrs) or 0.0)
+        ot_hrs = float(line.get("overtime_hours", ot_hrs) or 0.0)
         pt_rate = float(line.get("part_time_rate", pt_rate) or 0.0)
-        pt_hrs  = float(line.get("part_time_hours", pt_hrs) or 0.0)
-        levy    = float(line.get("levy", levy) or 0.0)
-        shg     = float(line.get("shg", shg) or 0.0)
-        sdl     = float(line.get("sdl", sdl) or 0.0)
+        pt_hrs = float(line.get("part_time_hours", pt_hrs) or 0.0)
+        levy = float(line.get("levy", levy) or 0.0)
+        advance = float(line.get("advance", advance) or 0.0)  # <<< add this line
+        shg = float(line.get("shg", shg) or 0.0)
+        sdl = float(line.get("sdl", sdl) or 0.0)
         cpf_emp = float(line.get("cpf_emp", cpf_emp) or 0.0)
-        cpf_er  = float(line.get("cpf_er", cpf_er) or 0.0)
+        cpf_er = float(line.get("cpf_er", cpf_er) or 0.0)
 
-    pt_amt  = pt_rate * pt_hrs
-    ot_amt  = ot_rate * ot_hrs
+    pt_amt = pt_rate * pt_hrs
+    ot_amt = ot_rate * ot_hrs
     cpf_total = cpf_emp + cpf_er
 
     gross = basic + comm + incent + allow + pt_amt + ot_amt
@@ -174,7 +184,8 @@ def _voucher_html(
         except Exception:
             return "0.00"
 
-    show_warn = (line is None) and (gross == 0 and ded_only == 0 and cpf_emp == 0 and cpf_er == 0 and sdl == 0 and levy == 0)
+    show_warn = (line is None) and (
+                gross == 0 and ded_only == 0 and cpf_emp == 0 and cpf_er == 0 and sdl == 0 and levy == 0)
 
     return f"""<!doctype html>
 <html>
@@ -332,7 +343,7 @@ def _voucher_html(
           <div style="margin-bottom:6px">{stamp_html}</div>
           <div style="font-weight:bold">Prepared by: {html.escape(company_name)}</div>
         </td>
-    
+
         <!-- Right: signature line then label -->
         <td style="width:50%;vertical-align:bottom;text-align:right">
           <div style="display:inline-block;width:70%;text-align:center">
@@ -343,10 +354,6 @@ def _voucher_html(
 
       </tr>
     </table>
-
-
-
-
 
   </div>
 </body>
@@ -425,23 +432,29 @@ class SalaryModuleWidget(QWidget):
         from calendar import monthrange
         from PySide6.QtWidgets import (
             QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
-            QTableWidget, QTableWidgetItem, QDialog,
+            QTableWidget, QTableWidgetItem, QDialog, QListWidget, QListWidgetItem,
             QDialogButtonBox, QMessageBox
         )
+        from PySide6.QtCore import Qt, QRect
+        from PySide6.QtGui import QPainter, QColor, QPen, QBrush
+        from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem, QStyle
         from sqlalchemy import text
+        import re
 
+        # ----------------
+        # helpers
+        # ----------------
         def _rf(x):
-            try:
-                return float(str(x).replace(",", "").replace("%", "").strip())
-            except Exception:
-                return 0.0
+            # robust number parse; strips $, commas, text, % etc
+            s = str(x or "")
+            s = s.replace("S$", "").replace("$", "")
+            s = s.replace(",", "")
+            m = re.findall(r"-?\d+(?:\.\d+)?", s)
+            return float(m[0]) if m else 0.0
 
         def _ri(x):
-            try:
-                xs = str(x).strip()
-                return int(xs) if xs else None
-            except Exception:
-                return None
+            xs = str(x or "").strip()
+            return int(xs) if xs else None
 
         # Date parser: prefer DD/MM/YYYY, also accept DD-MM-YYYY, YYYY-MM-DD, YYYY/MM/DD
         def _rd(x) -> Optional[date]:
@@ -472,12 +485,15 @@ class SalaryModuleWidget(QWidget):
                 return 30
             return on_date.year - dob.year - ((on_date.month, on_date.day) < (dob.month, dob.day))
 
+        # ----- rounding rules for CPF -----
+        from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN
+        def _round_dollar_half_up(x: float) -> float:
+            return float(Decimal(str(x)).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+
+        def _floor_dollar(x: float) -> float:
+            return float(Decimal(str(x)).quantize(Decimal('1'), rounding=ROUND_DOWN))
+
         # ---------- CPF rules read + compute (v2) ----------
-        # Columns:
-        # 0 Age Bracket | 1 Residency | 2 Year (PR) |
-        # 3 Salary From | 4 Salary To |
-        # 5 Total % TW | 6 Total % (TW-500) | 7 EE % TW | 8 EE % (TW-500) |
-        # 9 CPF Total Cap | 10 CPF Employee Cap | 11 Effective From | 12 Notes
         def _cpf_rows():
             rows = []
             tbl = getattr(self, "cpf_tbl", None)
@@ -491,11 +507,8 @@ class SalaryModuleWidget(QWidget):
                     return 0.0
 
             def _ri2(x):
-                try:
-                    xs = str(x).strip()
-                    return int(xs) if xs else None
-                except Exception:
-                    return None
+                xs = str(x or "").strip()
+                return int(xs) if xs else None
 
             def _rd2(x) -> Optional[date]:
                 s = (str(x or "").strip())
@@ -509,22 +522,20 @@ class SalaryModuleWidget(QWidget):
                 return None
 
             for r in range(tbl.rowCount()):
-                age_br   = (tbl.item(r, 0).text().strip() if tbl.item(r, 0) else "")
-                resid    = (tbl.item(r, 1).text().strip() if tbl.item(r, 1) else "")
-                pr_year  = _ri2(tbl.item(r, 2).text() if tbl.item(r, 2) else "")
+                age_br = (tbl.item(r, 0).text().strip() if tbl.item(r, 0) else "")
+                resid = (tbl.item(r, 1).text().strip() if tbl.item(r, 1) else "")
+                pr_year = _ri2(tbl.item(r, 2).text() if tbl.item(r, 2) else "")
                 sal_from = _rf2(tbl.item(r, 3).text() if tbl.item(r, 3) else "0")
-                sal_to   = _rf2(tbl.item(r, 4).text() if tbl.item(r, 4) else "0")
+                sal_to = _rf2(tbl.item(r, 4).text() if tbl.item(r, 4) else "0")
 
-                tot_pct_tw   = _rf2(tbl.item(r, 5).text() if tbl.item(r, 5) else "0")
+                tot_pct_tw = _rf2(tbl.item(r, 5).text() if tbl.item(r, 5) else "0")
                 tot_pct_tw_m = _rf2(tbl.item(r, 6).text() if tbl.item(r, 6) else "0")
-                ee_pct_tw    = _rf2(tbl.item(r, 7).text() if tbl.item(r, 7) else "0")
-                ee_pct_tw_m  = _rf2(tbl.item(r, 8).text() if tbl.item(r, 8) else "0")
+                ee_pct_tw = _rf2(tbl.item(r, 7).text() if tbl.item(r, 7) else "0")
+                ee_pct_tw_m = _rf2(tbl.item(r, 8).text() if tbl.item(r, 8) else "0")
 
                 cap_total = _rf2(tbl.item(r, 9).text() if tbl.item(r, 9) else "0")
-                cap_ee    = _rf2(tbl.item(r,10).text() if tbl.item(r,10) else "0")
-                eff_from  = _rd2(tbl.item(r,11).text() if tbl.item(r,11) else "")
-                # notes in col 12 ignored for calc
-
+                cap_ee = _rf2(tbl.item(r, 10).text() if tbl.item(r, 10) else "0")
+                eff_from = _rd2(tbl.item(r, 11).text() if tbl.item(r, 11) else "")
                 rows.append((
                     age_br, resid, pr_year, sal_from, sal_to,
                     tot_pct_tw, tot_pct_tw_m, ee_pct_tw, ee_pct_tw_m,
@@ -552,7 +563,6 @@ class SalaryModuleWidget(QWidget):
             if isinstance(val, int):
                 return val
             resid = (getattr(emp, "residency", "") or "")
-            import re
             m = re.search(r"[Yy]\s*(\d+)", resid)
             try:
                 return int(m.group(1)) if m else None
@@ -565,9 +575,9 @@ class SalaryModuleWidget(QWidget):
             pry = _employee_pr_year(emp)
 
             for (
-                age_br, resid_row, pr_year, sal_lo, sal_hi,
-                tot_pct_tw, tot_pct_tw_m, ee_pct_tw, ee_pct_tw_m,
-                cap_total, cap_ee, eff_from
+                    age_br, resid_row, pr_year, sal_lo, sal_hi,
+                    tot_pct_tw, tot_pct_tw_m, ee_pct_tw, ee_pct_tw_m,
+                    cap_total, cap_ee, eff_from
             ) in _cpf_rows():
 
                 if resid_row.strip().lower() != resid_emp:
@@ -584,48 +594,53 @@ class SalaryModuleWidget(QWidget):
                     if pry is None or pry != pr_year:
                         continue
 
-                # Bases with caps
                 base_total = min(tw, cap_total) if cap_total else tw
-                base_ee    = min(tw, cap_ee) if cap_ee else tw
-
-                # Two-term structure:
-                # Total  = (tot_pct_tw%) * TW + (tot_pct_tw_m%) * max(TW - 500, 0)
-                # EE     = (ee_pct_tw%)  * TW + (ee_pct_tw_m%)  * max(TW - 500, 0)
-                # ER     = max(Total - EE, 0)
+                base_ee = min(tw, cap_ee) if cap_ee else tw
                 off = _CPF_TW_MINUS_OFFSET
 
                 total_term1 = base_total * (tot_pct_tw / 100.0)
                 total_term2 = max(base_total - off, 0.0) * (tot_pct_tw_m / 100.0)
-                total_val   = round(total_term1 + total_term2, 2)
-
                 ee_term1 = base_ee * (ee_pct_tw / 100.0)
                 ee_term2 = max(base_ee - off, 0.0) * (ee_pct_tw_m / 100.0)
-                ee_val   = round(ee_term1 + ee_term2, 2)
 
-                er_val = round(max(total_val - ee_val, 0.0), 2)
-                return ee_val, er_val, round(ee_val + er_val, 2)
+                total_val = _round_dollar_half_up(total_term1 + total_term2)
+                ee_val = _floor_dollar(ee_term1 + ee_term2)
+                er_val = float(max(total_val - ee_val, 0.0))
+                return ee_val, er_val, float(ee_val + er_val)
 
             return 0.0, 0.0, 0.0
 
         # ---------- SHG ----------
-        # New columns:
-        # 0 SHG | 1 Income From | 2 Income To | 3 Contribution Type | 4 Contribution Value | 5 Effective From | 6 Notes
         def _load_shg_race_map() -> dict:
             try:
                 with SessionLocal() as s:
-                    from sqlalchemy import text
                     s.execute(text("""
-                        CREATE TABLE IF NOT EXISTS shg_race_map(
-                          account_id TEXT NOT NULL,
-                          race TEXT NOT NULL,
-                          shg  TEXT NOT NULL,
-                          PRIMARY KEY(account_id, race)
-                        );
-                    """))
+                                   CREATE TABLE IF NOT EXISTS shg_race_map
+                                   (
+                                       account_id
+                                       TEXT
+                                       NOT
+                                       NULL,
+                                       race
+                                       TEXT
+                                       NOT
+                                       NULL,
+                                       shg
+                                       TEXT
+                                       NOT
+                                       NULL,
+                                       PRIMARY
+                                       KEY
+                                   (
+                                       account_id,
+                                       race
+                                   )
+                                       );
+                                   """))
                     s.commit()
                     rows = s.execute(text("SELECT race, shg FROM shg_race_map WHERE account_id=:a"),
                                      {"a": str(tenant_id())}).fetchall()
-                return { (r.race or "").strip().lower(): (r.shg or "").strip().upper() for r in rows }
+                return {(r.race or "").strip().lower(): (r.shg or "").strip().upper() for r in rows}
             except Exception:
                 return {}
 
@@ -635,12 +650,12 @@ class SalaryModuleWidget(QWidget):
             if not tbl:
                 return rows
             for r in range(tbl.rowCount()):
-                shg  = (tbl.item(r, 0).text().strip().upper() if tbl.item(r, 0) else "")
-                lo   = _rf(tbl.item(r, 1).text() if tbl.item(r, 1) else "0")
-                hi   = _rf(tbl.item(r, 2).text() if tbl.item(r, 2) else "0")
+                shg = (tbl.item(r, 0).text().strip().upper() if tbl.item(r, 0) else "")
+                lo = _rf(tbl.item(r, 1).text() if tbl.item(r, 1) else "0")
+                hi = _rf(tbl.item(r, 2).text() if tbl.item(r, 2) else "0")
                 ctyp = (tbl.item(r, 3).text().strip().lower() if tbl.item(r, 3) else "")
                 cval = _rf(tbl.item(r, 4).text() if tbl.item(r, 4) else "0")
-                eff  = _rd(tbl.item(r, 5).text() if tbl.item(r, 5) else "")
+                eff = _rd(tbl.item(r, 5).text() if tbl.item(r, 5) else "")
                 rows.append((shg, lo, hi, ctyp, cval, eff))
             return rows
 
@@ -671,24 +686,21 @@ class SalaryModuleWidget(QWidget):
                     continue
                 if ctyp == "percent":
                     return round(tw * (cval / 100.0), 2)
-                # default flat
                 return float(cval)
             return 0.0
 
         # ---------- SDL ----------
-        # New columns:
-        # 0 Salary From | 1 Salary To | 2 Rate Type | 3 Rate Value | 4 Effective From | 5 Notes
         def _sdl_rows():
             rows = []
             tbl = getattr(self, "sdl_tbl", None)
             if not tbl:
                 return rows
             for r in range(tbl.rowCount()):
-                lo   = _rf(tbl.item(r, 0).text() if tbl.item(r, 0) else "0")
-                hi   = _rf(tbl.item(r, 1).text() if tbl.item(r, 1) else "0")
+                lo = _rf(tbl.item(r, 0).text() if tbl.item(r, 0) else "0")
+                hi = _rf(tbl.item(r, 1).text() if tbl.item(r, 1) else "0")
                 rtyp = (tbl.item(r, 2).text().strip().lower() if tbl.item(r, 2) else "")
                 rval = _rf(tbl.item(r, 3).text() if tbl.item(r, 3) else "0")
-                eff  = _rd(tbl.item(r, 4).text() if tbl.item(r, 4) else "")
+                eff = _rd(tbl.item(r, 4).text() if tbl.item(r, 4) else "")
                 rows.append((lo, hi, rtyp, rval, eff))
             return rows
 
@@ -702,7 +714,6 @@ class SalaryModuleWidget(QWidget):
                             return float(rval)
                         except Exception:
                             return 0.0
-                    # percent
                     return round(tw * (float(rval) / 100.0), 2)
             return 0.0
 
@@ -710,51 +721,200 @@ class SalaryModuleWidget(QWidget):
         def _ensure_tables():
             with SessionLocal() as s:
                 s.execute(text("""
-                CREATE TABLE IF NOT EXISTS payroll_batches(
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  year INTEGER NOT NULL,
-                  month INTEGER NOT NULL,
-                  status TEXT NOT NULL DEFAULT 'Draft',
-                  total_basic REAL DEFAULT 0,
-                  total_er REAL DEFAULT 0,
-                  grand_total REAL DEFAULT 0,
-                  created_at TEXT DEFAULT CURRENT_TIMESTAMP
-                );
-                """))
+                               CREATE TABLE IF NOT EXISTS payroll_batches
+                               (
+                                   id
+                                   INTEGER
+                                   PRIMARY
+                                   KEY
+                                   AUTOINCREMENT,
+                                   year
+                                   INTEGER
+                                   NOT
+                                   NULL,
+                                   month
+                                   INTEGER
+                                   NOT
+                                   NULL,
+                                   status
+                                   TEXT
+                                   NOT
+                                   NULL
+                                   DEFAULT
+                                   'Draft',
+                                   total_basic
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   total_er
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   grand_total
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   created_at
+                                   TEXT
+                                   DEFAULT
+                                   CURRENT_TIMESTAMP
+                               );
+                               """))
                 s.execute(text("""
-                CREATE TABLE IF NOT EXISTS payroll_batch_lines(
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  batch_id INTEGER NOT NULL,
-                  employee_id INTEGER NOT NULL,
-                  basic_salary REAL DEFAULT 0,
-                  commission REAL DEFAULT 0,
-                  incentives REAL DEFAULT 0,
-                  allowance REAL DEFAULT 0,
-                  overtime_rate REAL DEFAULT 0,
-                  overtime_hours REAL DEFAULT 0,
-                  part_time_rate REAL DEFAULT 0,
-                  part_time_hours REAL DEFAULT 0,
-                  levy REAL DEFAULT 0,
-                  shg REAL DEFAULT 0,
-                  sdl REAL DEFAULT 0,
-                  cpf_emp REAL DEFAULT 0,
-                  cpf_er REAL DEFAULT 0,
-                  cpf_total REAL DEFAULT 0,
-                  line_total REAL DEFAULT 0,
-                  ee_contrib REAL DEFAULT 0,
-                  er_contrib REAL DEFAULT 0,
-                  total_cash REAL DEFAULT 0
-                );
-                """))
+                               CREATE TABLE IF NOT EXISTS payroll_batch_lines
+                               (
+                                   id
+                                   INTEGER
+                                   PRIMARY
+                                   KEY
+                                   AUTOINCREMENT,
+                                   batch_id
+                                   INTEGER
+                                   NOT
+                                   NULL,
+                                   employee_id
+                                   INTEGER
+                                   NOT
+                                   NULL,
+                                   basic_salary
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   commission
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   incentives
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   allowance
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   overtime_rate
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   overtime_hours
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   part_time_rate
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   part_time_hours
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   levy
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   advance
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   shg
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   sdl
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   cpf_emp
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   cpf_er
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   cpf_total
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   line_total
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   ee_contrib
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   er_contrib
+                                   REAL
+                                   DEFAULT
+                                   0,
+                                   total_cash
+                                   REAL
+                                   DEFAULT
+                                   0
+                               );
+                               """))
+                try:
+                    cols = s.execute(text("PRAGMA table_info(payroll_batch_lines)")).fetchall()
+                    have = {c.name for c in cols}
+                    if "advance" not in have:
+                        s.execute(text("ALTER TABLE payroll_batch_lines ADD COLUMN advance REAL DEFAULT 0;"))
+                except Exception:
+                    pass
                 s.execute(text("""
-                CREATE TABLE IF NOT EXISTS shg_race_map(
-                  account_id TEXT NOT NULL,
-                  race TEXT NOT NULL,
-                  shg  TEXT NOT NULL,
-                  PRIMARY KEY(account_id, race)
-                );
-                """))
+                               CREATE TABLE IF NOT EXISTS shg_race_map
+                               (
+                                   account_id
+                                   TEXT
+                                   NOT
+                                   NULL,
+                                   race
+                                   TEXT
+                                   NOT
+                                   NULL,
+                                   shg
+                                   TEXT
+                                   NOT
+                                   NULL,
+                                   PRIMARY
+                                   KEY
+                               (
+                                   account_id,
+                                   race
+                               )
+                                   );
+                               """))
                 s.commit()
+
+        # ---------- format + delegates ----------
+        HOURS_COLS = {6, 8}  # OT Hours, PT Hours
+
+        def _fmt_cell(col, val_float):
+            if col in HOURS_COLS:
+                return f"{val_float:,.2f}"
+            return f"${val_float:,.2f}"
+
+        class _NoBorderCenterDelegate(QStyledItemDelegate):
+            def paint(self, painter: QPainter, option: QStyleOptionViewItem, index):
+                opt = QStyleOptionViewItem(option)
+                opt.displayAlignment = Qt.AlignCenter | Qt.AlignVCenter
+                opt.state &= ~QStyle.State_HasFocus
+                super().paint(painter, opt, index)
+
+        class _BorderedCenterDelegate(QStyledItemDelegate):
+            def paint(self, painter: QPainter, option: QStyleOptionViewItem, index):
+                opt = QStyleOptionViewItem(option)
+                opt.displayAlignment = Qt.AlignCenter | Qt.AlignVCenter
+                opt.state &= ~QStyle.State_HasFocus
+                super().paint(painter, opt, index)
+                # draw subtle border to emulate grid for editable cells
+                r: QRect = option.rect
+                pen = QPen(QColor("#e5e7eb"))
+                pen.setWidth(1)
+                painter.save()
+                painter.setPen(pen)
+                painter.drawRect(r.adjusted(0, 0, -1, -1))
+                painter.restore()
 
         # ---------- UI: batches list ----------
         host = QWidget()
@@ -803,10 +963,10 @@ class SalaryModuleWidget(QWidget):
             tbl.setRowCount(0)
             with SessionLocal() as s:
                 rows = s.execute(text("""
-                  SELECT id, year, month, total_basic, total_er, grand_total, status
-                  FROM payroll_batches
-                  ORDER BY year DESC, month DESC, id DESC
-                """)).fetchall()
+                                      SELECT id, year, month, total_basic, total_er, grand_total, status
+                                      FROM payroll_batches
+                                      ORDER BY year DESC, month DESC, id DESC
+                                      """)).fetchall()
             for _id, y, m, tb, ter, gt, st in rows:
                 r = tbl.rowCount()
                 tbl.insertRow(r)
@@ -818,9 +978,9 @@ class SalaryModuleWidget(QWidget):
 
                 tbl.setItem(r, 0, item(y))
                 tbl.setItem(r, 1, item(m))
-                tbl.setItem(r, 2, QTableWidgetItem(f"{(tb or 0):,.2f}"))
-                tbl.setItem(r, 3, QTableWidgetItem(f"{(ter or 0):,.2f}"))
-                tbl.setItem(r, 4, QTableWidgetItem(f"{(gt or 0):,.2f}"))
+                tbl.setItem(r, 2, QTableWidgetItem(f"${(tb or 0):,.2f}"))
+                tbl.setItem(r, 3, QTableWidgetItem(f"${(ter or 0):,.2f}"))
+                tbl.setItem(r, 4, QTableWidgetItem(f"${(gt or 0):,.2f}"))
                 tbl.setItem(r, 5, QTableWidgetItem(st or "Draft"))
 
         _load_batches()
@@ -830,71 +990,96 @@ class SalaryModuleWidget(QWidget):
             if r < 0: return None
             return tbl.item(r, 0).data(Qt.UserRole)
 
+        # ---- grid columns ----
         COLS = [
             "Name", "Basic", "Commission", "Incentives", "Allowance",
             "OT Rate", "OT Hours", "PT Rate", "PT Hours",
-            "Total", "Levy", "SHG", "SDL",
+            "Total", "Levy", "Advance", "SHG", "SDL",
             "CPF EE", "CPF ER", "CPF Total",
             "EE Contrib", "ER Contrib", "Cash Payout"
         ]
-        EDITABLE = {1, 2, 3, 4, 5, 6, 7, 8, 10}
+        # Editable only these
+        EDITABLE = {1, 2, 3, 4, 5, 6, 7, 8, 10, 11}
+        DERIVED = set(range(len(COLS))) - (EDITABLE | {0})
+        DERIVED_COLOR = QColor("#7a1f1f")  # dark red for uneditable fields
 
-        def _recalc_row(t, row_idx, emp_obj, on_date):
+        def _recalc_row(t, row_idx, emp_obj, on_date, name_list=None):
             f = lambda c: _rf(t.item(row_idx, c).text()) if t.item(row_idx, c) else 0.0
             basic, com, inc, allw = f(1), f(2), f(3), f(4)
             ot_r, ot_h, pt_r, pt_h = f(5), f(6), f(7), f(8)
             levy = f(10)
+            adv = f(11)
+
             gross = basic + com + inc + allw + (ot_r * ot_h) + (pt_r * pt_h)
+            # rules at last day of period
+            from datetime import date as _date
+            y = int(cb_year.currentText())
+            m = cb_month.currentIndex() + 1
+            on_date = _date(y, m, monthrange(y, m)[1])
+
             shg = _shg_for(emp_obj, gross, on_date)
             sdl = _sdl_for(gross, on_date)
+
+            # If Total (gross) is 0 → SDL = 0 and SHG (e.g., CDAC) = 0
+            if gross <= 0.0:
+                shg = 0.0
+                sdl = 0.0
+
             ee, er, cpf_t = _cpf_for(emp_obj, gross, on_date)
             ee_c = ee + shg
             er_c = er + sdl + levy
-            cash = gross - ee - shg
+            cash = gross - ee - shg - adv
 
             def setv(c, val):
-                it = QTableWidgetItem(f"{val:,.2f}")
-                it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                it = QTableWidgetItem(_fmt_cell(c, float(val)))
+                it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+                it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                if c in DERIVED:
+                    it.setForeground(QBrush(DERIVED_COLOR))
                 t.setItem(row_idx, c, it)
 
             setv(9, gross)
-            setv(11, shg)
-            setv(12, sdl)
-            setv(13, ee)
-            setv(14, er)
-            setv(15, cpf_t)
-            setv(16, ee_c)
-            setv(17, er_c)
-            setv(18, cash)
+            setv(12, shg)
+            setv(13, sdl)
+            setv(14, ee)
+            setv(15, er)
+            setv(16, cpf_t)
+            setv(17, ee_c)
+            setv(18, er_c)
+            setv(19, cash)
 
         def _recalc_totals(t):
             sums = [0.0] * t.columnCount()
             for r in range(t.rowCount()):
                 for c in range(t.columnCount()):
                     try:
-                        sums[c] += float(str(t.item(r, c).text()).replace(",", ""))
+                        sums[c] += _rf(t.item(r, c).text())
                     except Exception:
                         pass
             return {
                 "total_basic": sums[1],
-                "total_er": sums[17],
-                "grand_total": sums[18] + sums[17]
+                "total_er": sums[18],
+                "grand_total": sums[19] + sums[18]
             }
 
         def _open_batch_dialog(batch_id=None, read_only=False, y=None, m=None):
+            from sqlalchemy import text
+            from calendar import monthrange
+
+            dlg = QDialog(self)
+
             if batch_id:
                 with SessionLocal() as s:
                     b = s.execute(text("SELECT year, month, status FROM payroll_batches WHERE id=:i"),
                                   {"i": batch_id}).fetchone()
                     if not b:
-                        QMessageBox.warning(host, "Salary Review", "Batch not found.")
+                        QMessageBox.warning(self, "Salary Review", "Batch not found.")
                         return
                     y, m, status = int(b.year), int(b.month), b.status
                     if status == "Submitted" and not read_only:
-                        QMessageBox.information(host, "Salary Review", "Batch is submitted. Opening in view mode.")
+                        QMessageBox.information(self, "Salary Review", "Batch is submitted. Opening in view mode.")
                         read_only = True
 
-            dlg = QDialog(self)
             dlg.setWindowTitle("Salary Review")
             lay = QVBoxLayout(dlg)
 
@@ -903,53 +1088,111 @@ class SalaryModuleWidget(QWidget):
             hdr.addStretch(1)
             lay.addLayout(hdr)
 
+            # Single grid. Column 0 (Name) is hidden; names shown in frozen row header.
             grid = QTableWidget(0, len(COLS))
             grid.setHorizontalHeaderLabels(COLS)
+            grid.setShowGrid(False)
+            grid.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+            grid.setColumnHidden(0, True)
+            vh = grid.verticalHeader()
+            vh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            vh.setFixedWidth(220)
+            vh.setSectionsClickable(False)
             lay.addWidget(grid, 1)
 
-            from datetime import date as _date
-            from calendar import monthrange
-            on_date = _date(y, m, monthrange(y, m)[1])
+            # Delegates
+            nb = _NoBorderCenterDelegate(grid)
+            bd = _BorderedCenterDelegate(grid)
+            for c in range(len(COLS)):
+                grid.setItemDelegateForColumn(c, bd if c in EDITABLE else nb)
 
+            from datetime import date as _date
+            on_date = _date(y, m, monthrange(y, m)[1])
             row_emps = []
+
+            def _set_row_header(r, name):
+                hi = QTableWidgetItem((name or "").strip())
+                hi.setToolTip((name or "").strip())
+                grid.setVerticalHeaderItem(r, hi)
 
             if batch_id:
                 with SessionLocal() as s:
                     lines = s.execute(text("""
-                      SELECT l.employee_id, e.full_name,
-                             l.basic_salary, l.commission, l.incentives, l.allowance,
-                             l.overtime_rate, l.overtime_hours, l.part_time_rate, l.part_time_hours,
-                             l.levy, l.shg, l.sdl, l.cpf_emp, l.cpf_er, l.cpf_total,
-                             l.ee_contrib, l.er_contrib, l.total_cash
-                      FROM payroll_batch_lines l
-                      JOIN employees e ON e.id = l.employee_id
-                      WHERE l.batch_id=:b
-                      ORDER BY e.full_name COLLATE NOCASE ASC
-                    """), {"b": batch_id}).fetchall()
+                                           SELECT l.employee_id,
+                                                  e.full_name,
+                                                  l.basic_salary,
+                                                  l.commission,
+                                                  l.incentives,
+                                                  l.allowance,
+                                                  l.overtime_rate,
+                                                  l.overtime_hours,
+                                                  l.part_time_rate,
+                                                  l.part_time_hours,
+                                                  l.levy,
+                                                  l.advance,
+                                                  l.shg,
+                                                  l.sdl,
+                                                  l.cpf_emp,
+                                                  l.cpf_er,
+                                                  l.cpf_total,
+                                                  l.ee_contrib,
+                                                  l.er_contrib,
+                                                  l.total_cash
+                                           FROM payroll_batch_lines l
+                                                    JOIN employees e ON e.id = l.employee_id
+                                           WHERE l.batch_id = :b
+                                           ORDER BY e.full_name COLLATE NOCASE ASC
+                                           """), {"b": batch_id}).fetchall()
                 for ln in lines:
                     r = grid.rowCount()
                     grid.insertRow(r)
-                    vals = [
-                        ln.full_name, ln.basic_salary, ln.commission, ln.incentives, ln.allowance,
-                        ln.overtime_rate, ln.overtime_hours, ln.part_time_rate, ln.part_time_hours,
-                        ln.basic_salary + ln.commission + ln.incentives + ln.allowance + (
-                                ln.overtime_rate * ln.overtime_hours) + (ln.part_time_rate * ln.part_time_hours),
-                        ln.levy, ln.shg, ln.sdl, ln.cpf_emp, ln.cpf_er, ln.cpf_total, ln.ee_contrib, ln.er_contrib,
-                        ln.total_cash
-                    ]
-                    for c, v in enumerate(vals):
-                        it = QTableWidgetItem(f"{v}" if c == 0 else f"{float(v):, .2f}".replace(" ", ""))
-                        if c != 0:
-                            it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                        editable = (c in EDITABLE) and (not read_only)
-                        it.setFlags((it.flags() | Qt.ItemIsEditable) if editable else (it.flags() & ~Qt.ItemIsEditable))
+
+                    # Keep name in hidden col 0 for reference
+                    it_name = QTableWidgetItem(ln.full_name or "")
+                    it_name.setFlags(it_name.flags() & ~Qt.ItemIsEditable)
+                    grid.setItem(r, 0, it_name)
+                    _set_row_header(r, ln.full_name or "")
+
+                    def putnum(c, v, editable):
+                        it = QTableWidgetItem(_fmt_cell(c, float(v)))
+                        it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+                        flags = it.flags()
+                        if editable and (not read_only):
+                            it.setFlags(flags | Qt.ItemIsEditable)
+                        else:
+                            it.setFlags(flags & ~Qt.ItemIsEditable)
+                            if c in DERIVED:
+                                it.setForeground(QBrush(DERIVED_COLOR))
                         grid.setItem(r, c, it)
+
+                    putnum(1, ln.basic_salary, True)
+                    putnum(2, ln.commission, True)
+                    putnum(3, ln.incentives, True)
+                    putnum(4, ln.allowance, True)
+                    putnum(5, ln.overtime_rate, True)
+                    putnum(6, ln.overtime_hours, True)
+                    putnum(7, ln.part_time_rate, True)
+                    putnum(8, ln.part_time_hours, True)
+
+                    gross = (ln.basic_salary + ln.commission + ln.incentives + ln.allowance +
+                             (ln.overtime_rate * ln.overtime_hours) + (ln.part_time_rate * ln.part_time_hours))
+                    putnum(9, gross, False)
+                    putnum(10, ln.levy, True)
+                    putnum(11, ln.advance, True)
+                    putnum(12, ln.shg, False)
+                    putnum(13, ln.sdl, False)
+                    putnum(14, ln.cpf_emp, False)
+                    putnum(15, ln.cpf_er, False)
+                    putnum(16, ln.cpf_total, False)
+                    putnum(17, ln.ee_contrib, False)
+                    putnum(18, ln.er_contrib, False)
+                    putnum(19, ln.total_cash, False)
+
                     with SessionLocal() as s:
                         row_emps.append(s.get(Employee, int(ln.employee_id)))
             else:
                 def _active_employees(y, m):
                     som = date(y, m, 1)
-                    from calendar import monthrange
                     eom = date(y, m, monthrange(y, m)[1])
                     rows = []
                     with SessionLocal() as s:
@@ -984,38 +1227,53 @@ class SalaryModuleWidget(QWidget):
                     r = grid.rowCount()
                     grid.insertRow(r)
 
-                    def num(x):
-                        it = QTableWidgetItem(f"{float(x):,.2f}")
-                        it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                        return it
+                    it_name = QTableWidgetItem(e.full_name or "")
+                    it_name.setFlags(it_name.flags() & ~Qt.ItemIsEditable)
+                    grid.setItem(r, 0, it_name)
+                    _set_row_header(r, e.full_name or "")
 
-                    name = QTableWidgetItem(e.full_name or "")
-                    for c in range(len(COLS)):
-                        grid.setItem(r, c, QTableWidgetItem(""))
-                    grid.setItem(r, 0, name)
-                    grid.setItem(r, 1, num(getattr(e, "basic_salary", 0.0)))
-                    grid.setItem(r, 2, num(0.0))
-                    grid.setItem(r, 3, num(getattr(e, "incentives", 0.0)))
-                    grid.setItem(r, 4, num(getattr(e, "allowance", 0.0)))
-                    grid.setItem(r, 5, num(getattr(e, "overtime_rate", 0.0)))
-                    grid.setItem(r, 6, num(0.0))
-                    grid.setItem(r, 7, num(getattr(e, "parttime_rate", 0.0)))
-                    grid.setItem(r, 8, num(0.0))
-                    grid.setItem(r, 10, num(getattr(e, "levy", 0.0)))
-                    for c in range(len(COLS)):
-                        it = grid.item(r, c)
-                        if c in EDITABLE:
-                            it.setFlags(it.flags() | Qt.ItemIsEditable)
+                    def putnum(c, v, editable):
+                        it = QTableWidgetItem(_fmt_cell(c, float(v)) if c != 0 else "")
+                        if c != 0:
+                            it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+                        flags = it.flags()
+                        if editable:
+                            it.setFlags(flags | Qt.ItemIsEditable)
                         else:
-                            it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                            it.setFlags(flags & ~Qt.ItemIsEditable)
+                            if c in DERIVED:
+                                it.setForeground(QBrush(DERIVED_COLOR))
+                        grid.setItem(r, c, it)
+
+                    putnum(1, getattr(e, "basic_salary", 0.0), True)
+                    putnum(2, 0.0, True)
+                    putnum(3, getattr(e, "incentives", 0.0), True)
+                    putnum(4, getattr(e, "allowance", 0.0), True)
+                    putnum(5, getattr(e, "overtime_rate", 0.0), True)
+                    putnum(6, 0.0, True)  # OT Hours
+                    putnum(7, getattr(e, "parttime_rate", 0.0), True)
+                    putnum(8, 0.0, True)  # PT Hours
+                    putnum(10, getattr(e, "levy", 0.0), True)
+                    putnum(11, getattr(e, "advance", 0.0), True)
+
+                    # derived placeholders
+                    for c in (9, 12, 13, 14, 15, 16, 17, 18, 19):
+                        it = QTableWidgetItem(_fmt_cell(c, 0.0))
+                        it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+                        it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                        it.setForeground(QBrush(DERIVED_COLOR))
+                        grid.setItem(r, c, it)
+
                     row_emps.append(e)
 
+            # initial compute
             for r, e in enumerate(row_emps):
                 _recalc_row(grid, r, e, on_date)
 
             if not read_only:
                 def _cell_changed(r, c):
-                    if c not in EDITABLE: return
+                    if c not in EDITABLE:
+                        return
                     _recalc_row(grid, r, row_emps[r], on_date)
 
                 grid.cellChanged.connect(_cell_changed)
@@ -1037,49 +1295,56 @@ class SalaryModuleWidget(QWidget):
                             "INSERT INTO payroll_batches(year,month,status,total_basic,total_er,grand_total) "
                             "VALUES(:y,:m,:st,:tb,:ter,:gt)"),
                             {"y": y, "m": m, "st": status or "Draft",
-                             "tb": totals["total_basic"], "ter": totals["total_er"], "gt": totals["grand_total"]})
+                             "tb": totals['total_basic'], "ter": totals['total_er'], "gt": totals['grand_total']})
                         batch_id_local = r.lastrowid
                     else:
                         batch_id_local = batch_id
                         s.execute(text(
                             "UPDATE payroll_batches SET status=:st,total_basic=:tb,total_er=:ter,grand_total=:gt WHERE id=:i"),
-                            {"st": status or "Draft", "tb": totals["total_basic"], "ter": totals["total_er"],
-                             "gt": totals["grand_total"], "i": batch_id_local})
+                            {"st": status or "Draft", "tb": totals['total_basic'], "ter": totals['total_er'],
+                             "gt": totals['grand_total'], "i": batch_id_local})
                         s.execute(text("DELETE FROM payroll_batch_lines WHERE batch_id=:i"), {"i": batch_id_local})
 
                     for r in range(grid.rowCount()):
                         emp = row_emps[r]
                         vals = [grid.item(r, c).text() if grid.item(r, c) else "0" for c in range(1, len(COLS))]
                         nums = [_rf(v) for v in vals]
-                        (basic, comm, inc, allw, ot_r, ot_h, pt_r, pt_h, tot, levy, shg, sdl, cpf_ee, cpf_er, cpf_t,
-                         ee_c, er_c, cash) = nums
+                        (
+                            basic, comm, inc, allw,
+                            ot_r, ot_h, pt_r, pt_h,
+                            tot, levy, adv, shg, sdl,
+                            cpf_ee, cpf_er, cpf_t,
+                            ee_c, er_c, cash
+                        ) = nums
                         s.execute(text("""
-                          INSERT INTO payroll_batch_lines(
-                            batch_id, employee_id, basic_salary, commission, incentives, allowance,
-                            overtime_rate, overtime_hours, part_time_rate, part_time_hours,
-                            levy, shg, sdl, cpf_emp, cpf_er, cpf_total,
-                            line_total, ee_contrib, er_contrib, total_cash
-                          ) VALUES(
-                            :b,:e,:ba,:co,:in,:al,:otr,:oth,:ptr,:pth,:lev,:shg,:sdl,:ee,:er,:cpt,:lt,:eec,:erc,:cash
-                          )
-                        """), {
-                            "b": batch_id_local, "e": int(emp.id),
-                            "ba": basic, "co": comm, "in": inc, "al": allw,
-                            "otr": ot_r, "oth": ot_h, "ptr": pt_r, "pth": pt_h,
-                            "lev": levy, "shg": shg, "sdl": sdl,
-                            "ee": cpf_ee, "er": cpf_er, "cpt": cpf_t,
-                            "lt": tot, "eec": ee_c, "erc": er_c, "cash": cash
-                        })
+                                       INSERT INTO payroll_batch_lines(batch_id, employee_id, basic_salary, commission,
+                                                                       incentives, allowance,
+                                                                       overtime_rate, overtime_hours, part_time_rate,
+                                                                       part_time_hours,
+                                                                       levy, advance, shg, sdl, cpf_emp, cpf_er,
+                                                                       cpf_total,
+                                                                       line_total, ee_contrib, er_contrib, total_cash)
+                                       VALUES (:b, :e, :ba, :co, :in, :al, :otr, :oth, :ptr, :pth, :lev, :adv, :shg,
+                                               :sdl,
+                                               :ee, :er, :cpt, :lt, :eec, :erc, :cash)
+                                       """), {
+                                      "b": batch_id_local, "e": int(emp.id),
+                                      "ba": basic, "co": comm, "in": inc, "al": allw,
+                                      "otr": ot_r, "oth": ot_h, "ptr": pt_r, "pth": pt_h,
+                                      "lev": levy, "adv": adv, "shg": shg, "sdl": sdl,
+                                      "ee": cpf_ee, "er": cpf_er, "cpt": cpf_t,
+                                      "lt": tot, "eec": ee_c, "erc": er_c, "cash": cash
+                                  })
                     s.commit()
                 return batch_id_local
 
             def _on_clicked(btn):
-                text_btn = btn.text().lower()
-                if "save" in text_btn:
+                t = btn.text().lower()
+                if "save" in t:
                     _persist("Draft")
                     QMessageBox.information(dlg, "Salary Review", "Saved.")
                     _load_batches()
-                elif "submit" in text_btn:
+                elif "submit" in t:
                     _persist("Submitted")
                     QMessageBox.information(dlg, "Salary Review", "Submitted and locked.")
                     _load_batches()
@@ -1090,7 +1355,7 @@ class SalaryModuleWidget(QWidget):
             if not read_only:
                 btns.clicked.connect(_on_clicked)
 
-            dlg.resize(1200, 620)
+            dlg.resize(1260, 640)
             dlg.exec()
 
         def _create():
@@ -1159,11 +1424,14 @@ class SalaryModuleWidget(QWidget):
         self.v_year.addItems([str(y) for y in range(this_year - 5, this_year + 6)])
         self.v_year.setCurrentText(str(this_year))
 
-        ctrl.addWidget(QLabel("Employee")); ctrl.addWidget(self.v_emp)
+        ctrl.addWidget(QLabel("Employee"))
+        ctrl.addWidget(self.v_emp)
         ctrl.addSpacing(12)
-        ctrl.addWidget(QLabel("Month")); ctrl.addWidget(self.v_month)
+        ctrl.addWidget(QLabel("Month"))
+        ctrl.addWidget(self.v_month)
         ctrl.addSpacing(12)
-        ctrl.addWidget(QLabel("Year")); ctrl.addWidget(self.v_year)
+        ctrl.addWidget(QLabel("Year"))
+        ctrl.addWidget(self.v_year)
         ctrl.addStretch(1)
 
         self.btn_pdf = QPushButton("Export PDF")
@@ -1206,20 +1474,37 @@ class SalaryModuleWidget(QWidget):
             emp = s.get(Employee, emp_id) if emp_id else None
             try:
                 batch = s.execute(text("""
-                    SELECT id, status FROM payroll_batches
-                    WHERE year=:y AND month=:m
-                    ORDER BY CASE status WHEN 'Submitted' THEN 1 ELSE 2 END, id DESC
+                                       SELECT id, status
+                                       FROM payroll_batches
+                                       WHERE year =:y AND month =:m
+                                       ORDER BY CASE status WHEN 'Submitted' THEN 1 ELSE 2
+                                       END, id DESC
                     LIMIT 1
-                """), {"y": y, "m": m1}).fetchone()
+                                       """), {"y": y, "m": m1}).fetchone()
                 if batch and emp_id:
                     ln = s.execute(text("""
-                        SELECT basic_salary, commission, incentives, allowance,
-                               overtime_rate, overtime_hours, part_time_rate, part_time_hours,
-                               levy, shg, sdl, cpf_emp, cpf_er, cpf_total, ee_contrib, er_contrib, total_cash
-                        FROM payroll_batch_lines
-                        WHERE batch_id=:b AND employee_id=:e
-                        LIMIT 1
-                    """), {"b": int(batch.id), "e": int(emp_id)}).fetchone()
+                                        SELECT basic_salary,
+                                               commission,
+                                               incentives,
+                                               allowance,
+                                               overtime_rate,
+                                               overtime_hours,
+                                               part_time_rate,
+                                               part_time_hours,
+                                               levy,
+                                               advance,
+                                               shg,
+                                               sdl,
+                                               cpf_emp,
+                                               cpf_er,
+                                               cpf_total,
+                                               ee_contrib,
+                                               er_contrib,
+                                               total_cash
+                                        FROM payroll_batch_lines
+                                        WHERE batch_id = :b
+                                          AND employee_id = :e LIMIT 1
+                                        """), {"b": int(batch.id), "e": int(emp_id)}).fetchone()
                     if ln:
                         line = {
                             "basic_salary": float(ln.basic_salary or 0.0),
@@ -1231,10 +1516,12 @@ class SalaryModuleWidget(QWidget):
                             "part_time_rate": float(ln.part_time_rate or 0.0),
                             "part_time_hours": float(ln.part_time_hours or 0.0),
                             "levy": float(ln.levy or 0.0),
+                            "advance": float(ln.advance or 0.0),
                             "shg": float(ln.shg or 0.0),
                             "sdl": float(ln.sdl or 0.0),
                             "cpf_emp": float(ln.cpf_emp or 0.0),
                             "cpf_er": float(ln.cpf_er or 0.0),
+                            "cpf_total": float(ln.cpf_total or 0.0)
                         }
             except Exception:
                 pass
@@ -1282,55 +1569,127 @@ class SalaryModuleWidget(QWidget):
             with SessionLocal() as s:
                 # Legacy shells remain; v2 tables hold what the UI edits.
                 s.execute(text("""
-                CREATE TABLE IF NOT EXISTS cpf_rules_v2(
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  account_id TEXT NOT NULL,
-                  age_bracket TEXT NOT NULL,
-                  residency   TEXT NOT NULL,
-                  pr_year     INTEGER,
-                  salary_from REAL,
-                  salary_to   REAL,
-                  total_pct_tw REAL,
-                  total_pct_tw_minus REAL,
-                  ee_pct_tw REAL,
-                  ee_pct_tw_minus REAL,
-                  cpf_total_cap REAL,
-                  cpf_employee_cap REAL,
-                  effective_from TEXT,
-                  notes TEXT
-                )"""))
+                               CREATE TABLE IF NOT EXISTS cpf_rules_v2
+                               (
+                                   id
+                                   INTEGER
+                                   PRIMARY
+                                   KEY
+                                   AUTOINCREMENT,
+                                   account_id
+                                   TEXT
+                                   NOT
+                                   NULL,
+                                   age_bracket
+                                   TEXT
+                                   NOT
+                                   NULL,
+                                   residency
+                                   TEXT
+                                   NOT
+                                   NULL,
+                                   pr_year
+                                   INTEGER,
+                                   salary_from
+                                   REAL,
+                                   salary_to
+                                   REAL,
+                                   total_pct_tw
+                                   REAL,
+                                   total_pct_tw_minus
+                                   REAL,
+                                   ee_pct_tw
+                                   REAL,
+                                   ee_pct_tw_minus
+                                   REAL,
+                                   cpf_total_cap
+                                   REAL,
+                                   cpf_employee_cap
+                                   REAL,
+                                   effective_from
+                                   TEXT,
+                                   notes
+                                   TEXT
+                               )"""))
                 s.execute(text("""
-                CREATE TABLE IF NOT EXISTS shg_rules_v2(
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  account_id TEXT NOT NULL,
-                  shg TEXT NOT NULL,
-                  income_from REAL,
-                  income_to   REAL,
-                  contribution_type TEXT,
-                  contribution_value REAL,
-                  effective_from TEXT,
-                  notes TEXT
-                )"""))
+                               CREATE TABLE IF NOT EXISTS shg_rules_v2
+                               (
+                                   id
+                                   INTEGER
+                                   PRIMARY
+                                   KEY
+                                   AUTOINCREMENT,
+                                   account_id
+                                   TEXT
+                                   NOT
+                                   NULL,
+                                   shg
+                                   TEXT
+                                   NOT
+                                   NULL,
+                                   income_from
+                                   REAL,
+                                   income_to
+                                   REAL,
+                                   contribution_type
+                                   TEXT,
+                                   contribution_value
+                                   REAL,
+                                   effective_from
+                                   TEXT,
+                                   notes
+                                   TEXT
+                               )"""))
                 s.execute(text("""
-                CREATE TABLE IF NOT EXISTS sdl_rules_v2(
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  account_id TEXT NOT NULL,
-                  salary_from REAL,
-                  salary_to   REAL,
-                  rate_type TEXT,
-                  rate_value REAL,
-                  effective_from TEXT,
-                  notes TEXT
-                )"""))
+                               CREATE TABLE IF NOT EXISTS sdl_rules_v2
+                               (
+                                   id
+                                   INTEGER
+                                   PRIMARY
+                                   KEY
+                                   AUTOINCREMENT,
+                                   account_id
+                                   TEXT
+                                   NOT
+                                   NULL,
+                                   salary_from
+                                   REAL,
+                                   salary_to
+                                   REAL,
+                                   rate_type
+                                   TEXT,
+                                   rate_value
+                                   REAL,
+                                   effective_from
+                                   TEXT,
+                                   notes
+                                   TEXT
+                               )"""))
                 # Race map table used elsewhere
                 s.execute(text("""
-                CREATE TABLE IF NOT EXISTS shg_race_map(
-                  account_id TEXT NOT NULL,
-                  race TEXT NOT NULL,
-                  shg  TEXT NOT NULL,
-                  PRIMARY KEY(account_id, race)
-                )"""))
+                               CREATE TABLE IF NOT EXISTS shg_race_map
+                               (
+                                   account_id
+                                   TEXT
+                                   NOT
+                                   NULL,
+                                   race
+                                   TEXT
+                                   NOT
+                                   NULL,
+                                   shg
+                                   TEXT
+                                   NOT
+                                   NULL,
+                                   PRIMARY
+                                   KEY
+                               (
+                                   account_id,
+                                   race
+                               )
+                                   )"""))
                 s.commit()
+
         _ensure_settings_tables()
 
         # ---------- helpers ----------
@@ -1382,7 +1741,8 @@ class SalaryModuleWidget(QWidget):
                     tbl.setItem(r, c, QTableWidgetItem(val))
 
         def _csv_template(headers, title):
-            path, _ = QFileDialog.getSaveFileName(self, f"{title} CSV Template", f"{title}_template.csv", "CSV Files (*.csv)")
+            path, _ = QFileDialog.getSaveFileName(self, f"{title} CSV Template", f"{title}_template.csv",
+                                                  "CSV Files (*.csv)")
             if not path: return
             with open(path, "w", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow(headers)
@@ -1418,7 +1778,8 @@ class SalaryModuleWidget(QWidget):
                         direct_cols = [c for c in cols if "race" in c]
                         for rc in direct_cols:
                             try:
-                                rows = s.execute(text(f"SELECT DISTINCT {rc} AS v FROM {tbl} WHERE {rc} IS NOT NULL")).fetchall()
+                                rows = s.execute(
+                                    text(f"SELECT DISTINCT {rc} AS v FROM {tbl} WHERE {rc} IS NOT NULL")).fetchall()
                                 for r in rows:
                                     v = getattr(r, "v", None)
                                     if v and str(v).strip():
@@ -1426,7 +1787,8 @@ class SalaryModuleWidget(QWidget):
                             except Exception:
                                 pass
 
-                        group_cols = [c for c in cols if c in ("category", "group", "group_name", "type", "key", "field", "option_group")]
+                        group_cols = [c for c in cols if
+                                      c in ("category", "group", "group_name", "type", "key", "field", "option_group")]
                         value_cols = [c for c in cols if c in ("value", "label", "name", "option", "text")]
                         for gc in group_cols:
                             for vc in value_cols:
@@ -1478,14 +1840,16 @@ class SalaryModuleWidget(QWidget):
         self.voucher_format = QLineEdit(globals().get("_VOUCHER_FMT", "SV-{YYYY}{MM}-{EMP}"))
         self.voucher_format.setMaximumWidth(340)
         self.voucher_preview = QLabel("")
-        btn_preview = QPushButton("Preview"); btn_preview.setMaximumWidth(120)
-        btn_apply   = QPushButton("Apply");   btn_apply.setMaximumWidth(120)
+        btn_preview = QPushButton("Preview")
+        btn_preview.setMaximumWidth(120)
+        btn_apply = QPushButton("Apply")
+        btn_apply.setMaximumWidth(120)
 
         def _preview_code():
             sample = (self.voucher_format.text() or "SV-{YYYY}{MM}-{EMP}")
             code = (sample.replace("{YYYY}", "2025")
-                          .replace("{MM}", "01")
-                          .replace("{EMP}", "EMP001"))
+                    .replace("{MM}", "01")
+                    .replace("{EMP}", "EMP001"))
             self.voucher_preview.setText(f"Preview: {code}")
 
         def _apply_format():
@@ -1528,23 +1892,26 @@ class SalaryModuleWidget(QWidget):
             self.stamp_preview.setText("")
 
         def _upload_stamp():
-            path, _ = QFileDialog.getOpenFileName(self, "Select Company Stamp", "", "Images (*.png *.jpg *.jpeg)")
+            path, _ = QFileDialog.getOpenFileName(self, "Select Company Stamp", "", "Images (*.png *.jpg *.jpeg *.gif)")
             if not path:
                 return
             try:
                 with open(path, "rb") as f:
                     raw = f.read()
+                # persist into MAIN DB under current tenant
+                with MainSession() as s:
+                    row = s.query(CompanySettings).filter(CompanySettings.account_id == str(tenant_id())).first()
+                    if not row:
+                        row = CompanySettings(account_id=str(tenant_id()))
+                        s.add(row)
+                        s.flush()
+                    row.stamp = raw
+                    s.commit()
+
+                # live preview
                 b64 = base64.b64encode(raw).decode("ascii")
                 self._company_stamp_b64 = b64
                 globals()["_STAMP_B64"] = b64
-                try:
-                    with SessionLocal() as s:
-                        cs = s.query(CompanySettings).first()
-                        if cs is not None and hasattr(cs, "stamp"):
-                            setattr(cs, "stamp", raw)
-                            s.commit()
-                except Exception:
-                    pass
                 _refresh_stamp_preview_from_b64(b64)
                 try:
                     self._refresh_voucher_preview()
@@ -1557,10 +1924,10 @@ class SalaryModuleWidget(QWidget):
             self._company_stamp_b64 = None
             globals()["_STAMP_B64"] = None
             try:
-                with SessionLocal() as s:
-                    cs = s.query(CompanySettings).first()
-                    if cs is not None and hasattr(cs, "stamp"):
-                        setattr(cs, "stamp", None)
+                with MainSession() as s:
+                    row = s.query(CompanySettings).filter(CompanySettings.account_id == str(tenant_id())).first()
+                    if row:
+                        row.stamp = None
                         s.commit()
             except Exception:
                 pass
@@ -1593,15 +1960,19 @@ class SalaryModuleWidget(QWidget):
         ]
         cpf_box = QGroupBox("CPF Rules")
         cpf_v = QVBoxLayout(cpf_box)
-        cpf_hint = QLabel("Two-term: X%×TW + Y%×max(TW-500,0). Enter X and Y. Caps optional. Effective From in DD/MM/YYYY.")
+        cpf_hint = QLabel(
+            "Two-term: X%×TW + Y%×max(TW-500,0). Enter X and Y. Caps optional. Effective From in DD/MM/YYYY.")
         cpf_hint.setStyleSheet("color:#6b7280;")
         cpf_v.addWidget(cpf_hint)
         self.cpf_tbl = _mk_table(cpf_headers)
         cpf_v.addWidget(self.cpf_tbl)
         row = QHBoxLayout()
-        b_add = QPushButton("Add"); b_del = QPushButton("Delete")
-        b_imp = QPushButton("Import CSV"); b_exp = QPushButton("Export CSV")
-        b_tpl = QPushButton("CSV Template"); b_val = QPushButton("Validate")
+        b_add = QPushButton("Add")
+        b_del = QPushButton("Delete")
+        b_imp = QPushButton("Import CSV")
+        b_exp = QPushButton("Export CSV")
+        b_tpl = QPushButton("CSV Template")
+        b_val = QPushButton("Validate")
         b_del_all = QPushButton("Delete all")
         for b in (b_add, b_del): row.addWidget(b)
         row.addStretch(1)
@@ -1610,18 +1981,23 @@ class SalaryModuleWidget(QWidget):
         v.addWidget(cpf_box)
 
         # ---------- SHG (v2) ----------
-        shg_headers = ["SHG", "Income From", "Income To", "Contribution Type", "Contribution Value", "Effective From", "Notes"]
+        shg_headers = ["SHG", "Income From", "Income To", "Contribution Type", "Contribution Value", "Effective From",
+                       "Notes"]
         shg_box = QGroupBox("SHG Rules")
         shg_v = QVBoxLayout(shg_box)
-        shg_hint = QLabel("Type: flat or percent. Value is number only. Effective From in DD/MM/YYYY. Race→SHG map controls which table applies.")
+        shg_hint = QLabel(
+            "Type: flat or percent. Value is number only. Effective From in DD/MM/YYYY. Race→SHG map controls which table applies.")
         shg_hint.setStyleSheet("color:#6b7280;")
         shg_v.addWidget(shg_hint)
         self.shg_tbl = _mk_table(shg_headers)
         shg_v.addWidget(self.shg_tbl)
         row2 = QHBoxLayout()
-        s_add = QPushButton("Add"); s_del = QPushButton("Delete")
-        s_imp = QPushButton("Import CSV"); s_exp = QPushButton("Export CSV")
-        s_tpl = QPushButton("CSV Template"); s_val = QPushButton("Validate")
+        s_add = QPushButton("Add")
+        s_del = QPushButton("Delete")
+        s_imp = QPushButton("Import CSV")
+        s_exp = QPushButton("Export CSV")
+        s_tpl = QPushButton("CSV Template")
+        s_val = QPushButton("Validate")
         s_map = QPushButton("Manage Race→SHG")
         s_del_all = QPushButton("Delete all")
         for b in (s_add, s_del): row2.addWidget(b)
@@ -1634,15 +2010,19 @@ class SalaryModuleWidget(QWidget):
         sdl_headers = ["Salary From", "Salary To", "Rate Type", "Rate Value", "Effective From", "Notes"]
         sdl_box = QGroupBox("SDL Rules")
         sdl_v = QVBoxLayout(sdl_box)
-        sdl_hint = QLabel("Rate Type: percent or flat. If percent, enter 0.25 for 0.25%. Blank 'To' = no upper limit. Effective From in DD/MM/YYYY.")
+        sdl_hint = QLabel(
+            "Rate Type: percent or flat. If percent, enter 0.25 for 0.25%. Blank 'To' = no upper limit. Effective From in DD/MM/YYYY.")
         sdl_hint.setStyleSheet("color:#6b7280;")
         sdl_v.addWidget(sdl_hint)
         self.sdl_tbl = _mk_table(sdl_headers)
         sdl_v.addWidget(self.sdl_tbl)
         row3 = QHBoxLayout()
-        d_add = QPushButton("Add"); d_del = QPushButton("Delete")
-        d_imp = QPushButton("Import CSV"); d_exp = QPushButton("Export CSV")
-        d_tpl = QPushButton("CSV Template"); d_val = QPushButton("Validate")
+        d_add = QPushButton("Add")
+        d_del = QPushButton("Delete")
+        d_imp = QPushButton("Import CSV")
+        d_exp = QPushButton("Export CSV")
+        d_tpl = QPushButton("CSV Template")
+        d_val = QPushButton("Validate")
         d_del_all = QPushButton("Delete all")
         for b in (d_add, d_del): row3.addWidget(b)
         row3.addStretch(1)
@@ -1659,32 +2039,44 @@ class SalaryModuleWidget(QWidget):
                 for r in range(self.cpf_tbl.rowCount()):
                     g = lambda c: (self.cpf_tbl.item(r, c).text().strip() if self.cpf_tbl.item(r, c) else "")
                     s.execute(text("""
-                    INSERT INTO cpf_rules_v2(
-                      account_id, age_bracket, residency, pr_year, salary_from, salary_to,
-                      total_pct_tw, total_pct_tw_minus, ee_pct_tw, ee_pct_tw_minus,
-                      cpf_total_cap, cpf_employee_cap, effective_from, notes
-                    ) VALUES(
-                      :a,:age,:res,:yr,:sf,:st,:ttw,:ttwm,:eetw,:eetwm,:ct,:ce,:eff,:notes
-                    )"""), {
-                        "a": acct(),
-                        "age": g(0), "res": g(1), "yr": _ri(g(2)),
-                        "sf": _rf(g(3)), "st": _rf(g(4)),
-                        "ttw": _rf(g(5)), "ttwm": _rf(g(6)),
-                        "eetw": _rf(g(7)), "eetwm": _rf(g(8)),
-                        "ct": _rf(g(9)), "ce": _rf(g(10)),
-                        "eff": g(11), "notes": g(12)
-                    })
+                                   INSERT INTO cpf_rules_v2(account_id, age_bracket, residency, pr_year, salary_from,
+                                                            salary_to,
+                                                            total_pct_tw, total_pct_tw_minus, ee_pct_tw,
+                                                            ee_pct_tw_minus,
+                                                            cpf_total_cap, cpf_employee_cap, effective_from, notes)
+                                   VALUES (:a, :age, :res, :yr, :sf, :st, :ttw, :ttwm, :eetw, :eetwm, :ct, :ce, :eff,
+                                           :notes)"""), {
+                                  "a": acct(),
+                                  "age": g(0), "res": g(1), "yr": _ri(g(2)),
+                                  "sf": _rf(g(3)), "st": _rf(g(4)),
+                                  "ttw": _rf(g(5)), "ttwm": _rf(g(6)),
+                                  "eetw": _rf(g(7)), "eetwm": _rf(g(8)),
+                                  "ct": _rf(g(9)), "ce": _rf(g(10)),
+                                  "eff": g(11), "notes": g(12)
+                              })
                 s.commit()
 
         def _load_cpf_rules():
             self.cpf_tbl.setRowCount(0)
             with SessionLocal() as s:
                 rows = s.execute(text("""
-                SELECT age_bracket,residency,pr_year,salary_from,salary_to,
-                       total_pct_tw,total_pct_tw_minus,ee_pct_tw,ee_pct_tw_minus,
-                       cpf_total_cap,cpf_employee_cap,effective_from,notes
-                FROM cpf_rules_v2 WHERE account_id=:a ORDER BY id ASC
-                """), {"a": acct()}).fetchall()
+                                      SELECT age_bracket,
+                                             residency,
+                                             pr_year,
+                                             salary_from,
+                                             salary_to,
+                                             total_pct_tw,
+                                             total_pct_tw_minus,
+                                             ee_pct_tw,
+                                             ee_pct_tw_minus,
+                                             cpf_total_cap,
+                                             cpf_employee_cap,
+                                             effective_from,
+                                             notes
+                                      FROM cpf_rules_v2
+                                      WHERE account_id = :a
+                                      ORDER BY id ASC
+                                      """), {"a": acct()}).fetchall()
             for row in rows:
                 r = self.cpf_tbl.rowCount()
                 self.cpf_tbl.insertRow(r)
@@ -1706,27 +2098,33 @@ class SalaryModuleWidget(QWidget):
                 for r in range(self.shg_tbl.rowCount()):
                     g = lambda c: (self.shg_tbl.item(r, c).text().strip() if self.shg_tbl.item(r, c) else "")
                     s.execute(text("""
-                    INSERT INTO shg_rules_v2(
-                      account_id, shg, income_from, income_to,
-                      contribution_type, contribution_value, effective_from, notes
-                    ) VALUES(
-                      :a,:shg,:f,:t,:typ,:val,:eff,:notes
-                    )"""), {
-                        "a": acct(),
-                        "shg": g(0).upper(),
-                        "f": _rf(g(1)), "t": _rf(g(2)),
-                        "typ": g(3).lower(), "val": _rf(g(4)),
-                        "eff": g(5), "notes": g(6)
-                    })
+                                   INSERT INTO shg_rules_v2(account_id, shg, income_from, income_to,
+                                                            contribution_type, contribution_value, effective_from,
+                                                            notes)
+                                   VALUES (:a, :shg, :f, :t, :typ, :val, :eff, :notes)"""), {
+                                  "a": acct(),
+                                  "shg": g(0).upper(),
+                                  "f": _rf(g(1)), "t": _rf(g(2)),
+                                  "typ": g(3).lower(), "val": _rf(g(4)),
+                                  "eff": g(5), "notes": g(6)
+                              })
                 s.commit()
 
         def _load_shg_rules():
             self.shg_tbl.setRowCount(0)
             with SessionLocal() as s:
                 rows = s.execute(text("""
-                SELECT shg,income_from,income_to,contribution_type,contribution_value,effective_from,notes
-                FROM shg_rules_v2 WHERE account_id=:a ORDER BY id ASC
-                """), {"a": acct()}).fetchall()
+                                      SELECT shg,
+                                             income_from,
+                                             income_to,
+                                             contribution_type,
+                                             contribution_value,
+                                             effective_from,
+                                             notes
+                                      FROM shg_rules_v2
+                                      WHERE account_id = :a
+                                      ORDER BY id ASC
+                                      """), {"a": acct()}).fetchall()
             for row in rows:
                 r = self.shg_tbl.rowCount()
                 self.shg_tbl.insertRow(r)
@@ -1744,25 +2142,25 @@ class SalaryModuleWidget(QWidget):
                 for r in range(self.sdl_tbl.rowCount()):
                     g = lambda c: (self.sdl_tbl.item(r, c).text().strip() if self.sdl_tbl.item(r, c) else "")
                     s.execute(text("""
-                    INSERT INTO sdl_rules_v2(
-                      account_id, salary_from, salary_to, rate_type, rate_value, effective_from, notes
-                    ) VALUES(
-                      :a,:f,:t,:typ,:val,:eff,:notes
-                    )"""), {
-                        "a": acct(),
-                        "f": _rf(g(0)), "t": _rf(g(1)),
-                        "typ": g(2).lower(), "val": _rf(g(3)),
-                        "eff": g(4), "notes": g(5)
-                    })
+                                   INSERT INTO sdl_rules_v2(account_id, salary_from, salary_to, rate_type, rate_value,
+                                                            effective_from, notes)
+                                   VALUES (:a, :f, :t, :typ, :val, :eff, :notes)"""), {
+                                  "a": acct(),
+                                  "f": _rf(g(0)), "t": _rf(g(1)),
+                                  "typ": g(2).lower(), "val": _rf(g(3)),
+                                  "eff": g(4), "notes": g(5)
+                              })
                 s.commit()
 
         def _load_sdl_rules():
             self.sdl_tbl.setRowCount(0)
             with SessionLocal() as s:
                 rows = s.execute(text("""
-                SELECT salary_from,salary_to,rate_type,rate_value,effective_from,notes
-                FROM sdl_rules_v2 WHERE account_id=:a ORDER BY id ASC
-                """), {"a": acct()}).fetchall()
+                                      SELECT salary_from, salary_to, rate_type, rate_value, effective_from, notes
+                                      FROM sdl_rules_v2
+                                      WHERE account_id = :a
+                                      ORDER BY id ASC
+                                      """), {"a": acct()}).fetchall()
             for row in rows:
                 r = self.sdl_tbl.rowCount()
                 self.sdl_tbl.insertRow(r)
@@ -1797,10 +2195,12 @@ class SalaryModuleWidget(QWidget):
 
         # ---------- wire buttons ----------
         b_add.clicked.connect(lambda: self.cpf_tbl.insertRow(self.cpf_tbl.rowCount()))
-        b_del.clicked.connect(lambda: [self.cpf_tbl.removeRow(r) for r in sorted({ix.row() for ix in self.cpf_tbl.selectedIndexes()}, reverse=True)])
+        b_del.clicked.connect(lambda: [self.cpf_tbl.removeRow(r) for r in
+                                       sorted({ix.row() for ix in self.cpf_tbl.selectedIndexes()}, reverse=True)])
         b_imp.clicked.connect(lambda: _csv_import(self.cpf_tbl, cpf_headers, "CPF"))
         b_exp.clicked.connect(lambda: _csv_export(self.cpf_tbl, cpf_headers, "CPF"))
         b_tpl.clicked.connect(lambda: _csv_template(cpf_headers, "CPF"))
+
         def _on_validate_cpf():
             errs = _validate_cpf(self.cpf_tbl)
             if errs:
@@ -1808,14 +2208,17 @@ class SalaryModuleWidget(QWidget):
             else:
                 _save_cpf_rules()
                 QMessageBox.information(self, "CPF Validate", "OK. Saved.")
+
         b_val.clicked.connect(_on_validate_cpf)
         b_del_all.clicked.connect(_delete_all_cpf)
 
         s_add.clicked.connect(lambda: self.shg_tbl.insertRow(self.shg_tbl.rowCount()))
-        s_del.clicked.connect(lambda: [self.shg_tbl.removeRow(r) for r in sorted({ix.row() for ix in self.shg_tbl.selectedIndexes()}, reverse=True)])
+        s_del.clicked.connect(lambda: [self.shg_tbl.removeRow(r) for r in
+                                       sorted({ix.row() for ix in self.shg_tbl.selectedIndexes()}, reverse=True)])
         s_imp.clicked.connect(lambda: _csv_import(self.shg_tbl, shg_headers, "SHG"))
         s_exp.clicked.connect(lambda: _csv_export(self.shg_tbl, shg_headers, "SHG"))
         s_tpl.clicked.connect(lambda: _csv_template(shg_headers, "SHG"))
+
         def _on_validate_shg():
             errs = _validate_shg(self.shg_tbl)
             if errs:
@@ -1823,6 +2226,7 @@ class SalaryModuleWidget(QWidget):
             else:
                 _save_shg_rules()
                 QMessageBox.information(self, "SHG Validate", "OK. Saved.")
+
         s_val.clicked.connect(_on_validate_shg)
         s_del_all.clicked.connect(_delete_all_shg)
 
@@ -1842,13 +2246,14 @@ class SalaryModuleWidget(QWidget):
             races = _list_defined_races()
             if not races:
                 with SessionLocal() as s:
-                    races = sorted({(e.race or "").strip() for e in s.query(Employee).filter(Employee.account_id == tenant_id()).all()
+                    races = sorted({(e.race or "").strip() for e in
+                                    s.query(Employee).filter(Employee.account_id == tenant_id()).all()
                                     if (e.race or "").strip()}, key=lambda x: x.lower())
 
             with SessionLocal() as s:
                 rows = s.execute(text("SELECT race, shg FROM shg_race_map WHERE account_id=:a"),
                                  {"a": str(tenant_id())}).fetchall()
-                existing = { (r.race or "").strip().lower(): (r.shg or "").strip().upper() for r in rows }
+                existing = {(r.race or "").strip().lower(): (r.shg or "").strip().upper() for r in rows}
 
             options = ["MBMF", "CDAC", "SINDA", "ECF", "OTHERS"]  # added OTHERS
             for rname in races:
@@ -1875,10 +2280,10 @@ class SalaryModuleWidget(QWidget):
                         if not race or not shg:
                             continue
                         s.execute(text("""
-                            INSERT INTO shg_race_map(account_id, race, shg)
-                            VALUES(:a, :r, :s)
-                            ON CONFLICT(account_id, race) DO UPDATE SET shg=excluded.shg
-                        """), {"a": str(tenant_id()), "r": race, "s": shg})
+                                       INSERT INTO shg_race_map(account_id, race, shg)
+                                       VALUES (:a, :r, :s) ON CONFLICT(account_id, race) DO
+                                       UPDATE SET shg=excluded.shg
+                                       """), {"a": str(tenant_id()), "r": race, "s": shg})
                     s.commit()
                 QMessageBox.information(dlg, "Race→SHG", "Saved.")
                 dlg.accept()
@@ -1891,10 +2296,12 @@ class SalaryModuleWidget(QWidget):
         s_map.clicked.connect(_open_race_shg_map)
 
         d_add.clicked.connect(lambda: self.sdl_tbl.insertRow(self.sdl_tbl.rowCount()))
-        d_del.clicked.connect(lambda: [self.sdl_tbl.removeRow(r) for r in sorted({ix.row() for ix in self.sdl_tbl.selectedIndexes()}, reverse=True)])
+        d_del.clicked.connect(lambda: [self.sdl_tbl.removeRow(r) for r in
+                                       sorted({ix.row() for ix in self.sdl_tbl.selectedIndexes()}, reverse=True)])
         d_imp.clicked.connect(lambda: _csv_import(self.sdl_tbl, sdl_headers, "SDL"))
         d_exp.clicked.connect(lambda: _csv_export(self.sdl_tbl, sdl_headers, "SDL"))
         d_tpl.clicked.connect(lambda: _csv_template(sdl_headers, "SDL"))
+
         def _on_validate_sdl():
             errs = _validate_sdl(self.sdl_tbl)
             if errs:
@@ -1902,6 +2309,7 @@ class SalaryModuleWidget(QWidget):
             else:
                 _save_sdl_rules()
                 QMessageBox.information(self, "SDL Validate", "OK. Saved.")
+
         d_val.clicked.connect(_on_validate_sdl)
         d_del_all.clicked.connect(_delete_all_sdl)
 
@@ -1957,16 +2365,16 @@ def _validate_cpf(tbl):
         resid = (tbl.item(r, 1).text().strip() if tbl.item(r, 1) else "")
         yr = (tbl.item(r, 2).text().strip() if tbl.item(r, 2) else "")
         sal_from = (tbl.item(r, 3).text().strip() if tbl.item(r, 3) else "0")
-        sal_to   = (tbl.item(r, 4).text().strip() if tbl.item(r, 4) else "0")
+        sal_to = (tbl.item(r, 4).text().strip() if tbl.item(r, 4) else "0")
 
-        t_tw  = (tbl.item(r, 5).text().strip() if tbl.item(r, 5) else "0")
-        t_m   = (tbl.item(r, 6).text().strip() if tbl.item(r, 6) else "0")
+        t_tw = (tbl.item(r, 5).text().strip() if tbl.item(r, 5) else "0")
+        t_m = (tbl.item(r, 6).text().strip() if tbl.item(r, 6) else "0")
         ee_tw = (tbl.item(r, 7).text().strip() if tbl.item(r, 7) else "0")
-        ee_m  = (tbl.item(r, 8).text().strip() if tbl.item(r, 8) else "0")
+        ee_m = (tbl.item(r, 8).text().strip() if tbl.item(r, 8) else "0")
 
         cap_total = (tbl.item(r, 9).text().strip() if tbl.item(r, 9) else "0")
-        cap_ee    = (tbl.item(r,10).text().strip() if tbl.item(r,10) else "0")
-        eff_from  = (tbl.item(r,11).text().strip() if tbl.item(r,11) else "")
+        cap_ee = (tbl.item(r, 10).text().strip() if tbl.item(r, 10) else "0")
+        eff_from = (tbl.item(r, 11).text().strip() if tbl.item(r, 11) else "")
 
         s_from = rf(sal_from); s_to = rf(sal_to)
         y = ri(yr)
@@ -1994,6 +2402,7 @@ def _validate_cpf(tbl):
 
 def _validate_shg(tbl):
     errs = []
+
     def rf(x):
         try:
             return float(str(x).replace(",", "").strip())

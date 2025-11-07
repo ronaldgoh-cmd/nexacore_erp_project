@@ -1,4 +1,3 @@
-# nexacore_erp/core/database.py
 from __future__ import annotations
 
 from pathlib import Path
@@ -29,12 +28,20 @@ SessionMain = sessionmaker(bind=MAIN_ENGINE, autocommit=False, autoflush=False, 
 # Back-compat alias
 SessionLocal = SessionMain
 
+def get_main_session():
+    return SessionMain()
+
 def init_db() -> None:
     """Create core tables on the main database. Import inside to avoid circulars."""
     from . import models as core_models  # noqa: F401
     Base.metadata.create_all(bind=MAIN_ENGINE)
-    with MAIN_ENGINE.connect() as conn:
+    # Enable FKs and run lightweight migrations
+    with MAIN_ENGINE.begin() as conn:
         conn.execute(text("PRAGMA foreign_keys = ON"))
+        # add 'stamp' column if missing
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(company_settings)")).fetchall()}
+        if "stamp" not in cols:
+            conn.execute(text("ALTER TABLE company_settings ADD COLUMN stamp BLOB"))
 
 # ---------- Module databases (separate .db per module) ----------
 MODULE_DB_FILES = {
