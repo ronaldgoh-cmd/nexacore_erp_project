@@ -14,6 +14,7 @@ from ..ui.about_dialog import AboutDialog
 from ..core.database import SessionLocal
 from ..core.models import User, UserSettings, ModuleState, CompanySettings
 from ..core.plugins import discover_modules
+from ..core.permissions import has_permission, can_view
 from ..core import themes
 
 from datetime import datetime
@@ -46,7 +47,7 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, self.nav_dock)
 
         nav_host = QWidget(self)
-        nav_host.setObjectName("NavPanel")  # for themed background
+        nav_host.setObjectName("NavPanel")
         nav_layout = QVBoxLayout(nav_host)
         nav_layout.setContentsMargins(8, 8, 8, 8)
         nav_layout.setSpacing(6)
@@ -98,14 +99,13 @@ class MainWindow(QMainWindow):
         row1.addWidget(left_sp); row1.addWidget(self.fixed_title); row1.addWidget(right_sp)
         v.addLayout(row1)
 
-        # Section 2: logo + company name + line1 + line2 (stacked)
+        # Section 2: logo + company name + line1 + line2
         row2 = QHBoxLayout()
         row2.setContentsMargins(0, 0, 0, 0)
         row2.setSpacing(10)
 
-        # Centered logo inside its own fixed box
         self.header_logo = QLabel(host)
-        self.header_logo.setFixedSize(56, 56)   # fixed box
+        self.header_logo.setFixedSize(56, 56)
         self.header_logo.setAlignment(Qt.AlignCenter)
         self.header_logo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.header_logo.setScaledContents(True)
@@ -184,7 +184,6 @@ class MainWindow(QMainWindow):
 
     # ===== Helpers =====
     def _normalize_tz(self, key: str) -> str:
-        """Invert sign for IANA Etc/GMT±X zones: Etc/GMT+8 means UTC-8."""
         if not key:
             return "Etc/UTC"
         m = re.fullmatch(r"Etc/GMT([+-])(\d+)", key, flags=re.IGNORECASE)
@@ -195,14 +194,12 @@ class MainWindow(QMainWindow):
         return key
 
     def _login_flow(self):
-        """Open login dialog, support hardcoded admin/admin123, and normal auth."""
         while True:
             dlg = LoginDialog()
             if dlg.exec() != QDialog.Accepted:
                 self.close()
                 return
 
-            # pull credentials from the dialog
             try:
                 if hasattr(dlg, "credentials"):
                     username, password = dlg.credentials()
@@ -215,7 +212,7 @@ class MainWindow(QMainWindow):
             username = (username or "").strip()
             password = password or ""
 
-            # --- DEV BYPASS: admin / admin123 ---
+            # DEV BYPASS
             if username.lower() == "admin" and password == "admin123":
                 with SessionLocal() as s:
                     user = s.query(User).filter(User.username == "admin").first()
@@ -239,7 +236,6 @@ class MainWindow(QMainWindow):
                 self._apply_theme()
                 break
 
-            # --- Normal auth path ---
             if not username:
                 QMessageBox.warning(self, "Login failed", "Username is required.")
                 continue
@@ -257,7 +253,7 @@ class MainWindow(QMainWindow):
                     if _verify_password:
                         ok = _verify_password(password, user.password_hash)
                     else:
-                        ok = (password == user.password_hash)  # fallback if hashing unavailable
+                        ok = (password == user.password_hash)
                 except Exception:
                     ok = False
 
@@ -277,7 +273,9 @@ class MainWindow(QMainWindow):
 
             self.account_btn.setText(user.username)
             self.company_act_btn.setEnabled(user.role in ("admin", "superadmin"))
-            self.modules_act_btn.setEnabled(user.role == "superadmin")
+            self.modules_act_btn.setEnabled(
+                user.role == "superadmin" or has_permission(user.id, "modules.install")
+            )
             self._apply_theme()
             break
 
@@ -307,18 +305,38 @@ class MainWindow(QMainWindow):
         self.nav.clear()
         mods = discover_modules()
         enabled = self._enabled_states()
+
         for info, module in mods:
             mname = info["name"]
-            if enabled.get(mname):
-                mitem = QTreeWidgetItem([mname])
-                mitem.setData(0, Qt.UserRole, ("module", mname))
+            if not enabled.get(mname):
+                continue
+
+            # access check
+            if self.user and self.user.role != "superadmin":
+                module_ok = can_view(self.user.id, mname)
+            else:
+                module_ok = True
+
+            mitem = QTreeWidgetItem([mname])
+            mitem.setData(0, Qt.UserRole, ("module", mname))
+            any_sub_added = False
+
+            for sub in info.get("submodules", []):
+                full = f"{mname}/{sub}"
+                if not enabled.get(full):
+                    continue
+                sub_ok = True
+                if self.user and self.user.role != "superadmin":
+                    sub_ok = can_view(self.user.id, mname, sub)
+                if not sub_ok:
+                    continue
+                sitem = QTreeWidgetItem([sub])
+                sitem.setData(0, Qt.UserRole, ("submodule", mname, sub))
+                mitem.addChild(sitem)
+                any_sub_added = True
+
+            if module_ok or any_sub_added:
                 self.nav.addTopLevelItem(mitem)
-                for sub in info.get("submodules", []):
-                    full = f"{mname}/{sub}"
-                    if enabled.get(full):
-                        sitem = QTreeWidgetItem([sub])
-                        sitem.setData(0, Qt.UserRole, ("submodule", mname, sub))
-                        mitem.addChild(sitem)
                 mitem.setExpanded(True)
 
     # ===== Open content =====
@@ -327,6 +345,20 @@ class MainWindow(QMainWindow):
         if not role:
             return
         t = role[0]
+
+        # runtime access guard
+        if self.user and self.user.role != "superadmin":
+            if t == "module":
+                name = role[1]
+                if not can_view(self.user.id, name):
+                    QMessageBox.warning(self, "Access denied", f"No view access to {name}.")
+                    return
+            else:
+                mname, sub = role[1], role[2]
+                if not can_view(self.user.id, mname, sub):
+                    QMessageBox.warning(self, "Access denied", f"No view access to {mname} / {sub}.")
+                    return
+
         if t == "module":
             name = role[1]
             for info, module in discover_modules():
@@ -380,10 +412,11 @@ class MainWindow(QMainWindow):
         self.user = None
         self.user_settings = None
         self._login_flow()
+        self._rebuild_nav()
         self._refresh_identity()
 
     def open_module_manager(self):
-        if self.user.role != "superadmin":
+        if not (self.user and (self.user.role == "superadmin" or has_permission(self.user.id, "modules.install"))):
             return
 
         mods = discover_modules()

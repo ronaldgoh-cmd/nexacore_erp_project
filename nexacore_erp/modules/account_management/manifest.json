@@ -1,0 +1,7 @@
+{
+  "name": "Account Management",
+  "version": "0.1.0",
+  "submodules": ["Users", "Roles & Access"],
+  "requires": ["core>=0.1.0"],
+  "description": "Manage users, roles, permissions, and per-module access."
+}
