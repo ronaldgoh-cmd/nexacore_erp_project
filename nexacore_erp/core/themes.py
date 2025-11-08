@@ -50,6 +50,19 @@ QMenu::item:selected { background: #e7f0fe; color: #0a6ed1; }
 
 /* Status bar */
 QStatusBar { background: #ffffff; color: #2a3b4f; border-top: 1px solid #d6dbe3; }
+
+/* Explicit checkbox and radio indicators for consistency */
+QCheckBox, QRadioButton { color: #18202a; }
+QCheckBox::indicator, QRadioButton::indicator { width: 18px; height: 18px; }
+QCheckBox::indicator:unchecked, QRadioButton::indicator:unchecked {
+  border: 1px solid #888; background: transparent;
+}
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+  border: 1px solid #0a6ed1; background: #0a6ed1;
+}
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
+  border: 1px solid #c8ced6; background: #eef2f6;
+}
 """
 
 DARK = """
@@ -102,4 +115,17 @@ QMenu::item:selected { background: #243551; color: #9fc2ff; }
 
 /* Status bar */
 QStatusBar { background: #101521; color: #cdd7e5; border-top: 1px solid #2a3446; }
+
+/* Explicit checkbox and radio indicators for consistency */
+QCheckBox, QRadioButton { color: #e6edf3; }
+QCheckBox::indicator, QRadioButton::indicator { width: 18px; height: 18px; }
+QCheckBox::indicator:unchecked, QRadioButton::indicator:unchecked {
+  border: 1px solid #888; background: #2b2f3a;
+}
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+  border: 1px solid #4a90e2; background: #4a90e2;
+}
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
+  border: 1px solid #2a3446; background: #151c2a;
+}
 """

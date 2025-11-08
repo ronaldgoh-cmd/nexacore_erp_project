@@ -1,7 +1,8 @@
 from PySide6.QtWidgets import (
     QMainWindow, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QSizePolicy, QDialog, QLineEdit, QTreeWidget, QTreeWidgetItem,
-    QAbstractItemView, QDialogButtonBox, QDockWidget, QTabWidget, QStatusBar, QMenu
+    QAbstractItemView, QDialogButtonBox, QDockWidget, QTabWidget, QStatusBar, QMenu,
+    QMessageBox
 )
 from PySide6.QtGui import QAction, QPixmap
 from PySide6.QtCore import QTimer, Qt
@@ -11,7 +12,7 @@ from ..ui.company_settings_dialog import CompanySettingsDialog
 from ..ui.user_settings_dialog import UserSettingsDialog
 from ..ui.about_dialog import AboutDialog
 from ..core.database import SessionLocal
-from ..core.models import UserSettings, ModuleState, CompanySettings
+from ..core.models import User, UserSettings, ModuleState, CompanySettings
 from ..core.plugins import discover_modules
 from ..core import themes
 
@@ -102,11 +103,12 @@ class MainWindow(QMainWindow):
         row2.setContentsMargins(0, 0, 0, 0)
         row2.setSpacing(10)
 
+        # Centered logo inside its own fixed box
         self.header_logo = QLabel(host)
-        self.header_logo.setFixedHeight(48)
-        self.header_logo.setMinimumWidth(120)
-        self.header_logo.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
-        self.header_logo.setScaledContents(False)
+        self.header_logo.setFixedSize(56, 56)   # fixed box
+        self.header_logo.setAlignment(Qt.AlignCenter)
+        self.header_logo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.header_logo.setScaledContents(True)
 
         text_box = QWidget(host)
         tv = QVBoxLayout(text_box)
@@ -175,8 +177,8 @@ class MainWindow(QMainWindow):
         if cs.logo:
             pm = QPixmap()
             pm.loadFromData(cs.logo)
-            target_h = self.header_logo.height()
-            self.header_logo.setPixmap(pm.scaledToHeight(target_h, Qt.SmoothTransformation))
+            pm_scaled = pm.scaled(self.header_logo.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.header_logo.setPixmap(pm_scaled)
         else:
             self.header_logo.clear()
 
@@ -193,19 +195,91 @@ class MainWindow(QMainWindow):
         return key
 
     def _login_flow(self):
-        dlg = LoginDialog()
-        if dlg.exec() == QDialog.Accepted:
-            self.user = dlg.result_user
+        """Open login dialog, support hardcoded admin/admin123, and normal auth."""
+        while True:
+            dlg = LoginDialog()
+            if dlg.exec() != QDialog.Accepted:
+                self.close()
+                return
+
+            # pull credentials from the dialog
+            try:
+                if hasattr(dlg, "credentials"):
+                    username, password = dlg.credentials()
+                else:
+                    username = dlg.ed_user.text().strip()
+                    password = dlg.ed_pass.text()
+            except Exception:
+                username, password = "", ""
+
+            username = (username or "").strip()
+            password = password or ""
+
+            # --- DEV BYPASS: admin / admin123 ---
+            if username.lower() == "admin" and password == "admin123":
+                with SessionLocal() as s:
+                    user = s.query(User).filter(User.username == "admin").first()
+                    if not user:
+                        try:
+                            from ..core.auth import hash_password as _hash
+                        except Exception:
+                            _hash = None
+                        pwhash = _hash("admin123") if _hash else "admin123"
+                        user = User(username="admin", password_hash=pwhash, role="superadmin", account_id="default")
+                        s.add(user); s.commit(); s.refresh(user)
+                    us = s.query(UserSettings).filter(UserSettings.user_id == user.id).first()
+                    if not us:
+                        us = UserSettings(user_id=user.id, account_id="default", timezone="Asia/Singapore", theme="light")
+                        s.add(us); s.commit(); s.refresh(us)
+                self.user = user
+                self.user_settings = us
+                self.account_btn.setText(user.username)
+                self.company_act_btn.setEnabled(True)
+                self.modules_act_btn.setEnabled(True)
+                self._apply_theme()
+                break
+
+            # --- Normal auth path ---
+            if not username:
+                QMessageBox.warning(self, "Login failed", "Username is required.")
+                continue
+
+            with SessionLocal() as s:
+                user = s.query(User).filter(User.username == username).first()
+
+            ok = False
+            if user:
+                try:
+                    from ..core.auth import verify_password as _verify_password
+                except Exception:
+                    _verify_password = None
+                try:
+                    if _verify_password:
+                        ok = _verify_password(password, user.password_hash)
+                    else:
+                        ok = (password == user.password_hash)  # fallback if hashing unavailable
+                except Exception:
+                    ok = False
+
+            if not ok:
+                QMessageBox.warning(self, "Login failed", "Invalid username or password.")
+                continue
+
+            self.user = user
             with SessionLocal() as s:
                 self.user_settings = s.query(UserSettings).filter(
-                    UserSettings.user_id == self.user.id
+                    UserSettings.user_id == user.id
                 ).first()
-            self.account_btn.setText(self.user.username)
+                if not self.user_settings:
+                    self.user_settings = UserSettings(user_id=user.id, account_id="default",
+                                                      timezone="Asia/Singapore", theme="light")
+                    s.add(self.user_settings); s.commit(); s.refresh(self.user_settings)
+
+            self.account_btn.setText(user.username)
+            self.company_act_btn.setEnabled(user.role in ("admin", "superadmin"))
+            self.modules_act_btn.setEnabled(user.role == "superadmin")
             self._apply_theme()
-            self.company_act_btn.setEnabled(self.user.role in ("admin", "superadmin"))
-            self.modules_act_btn.setEnabled(self.user.role == "superadmin")
-        else:
-            self.close()
+            break
 
     def _apply_theme(self):
         if not self.user_settings:
@@ -218,7 +292,6 @@ class MainWindow(QMainWindow):
         try:
             tz = ZoneInfo(tz_key)
         except Exception:
-            # sensible local fallback for you
             try:
                 tz = ZoneInfo("Asia/Singapore")
             except Exception:
@@ -265,13 +338,11 @@ class MainWindow(QMainWindow):
             title = f"{mname} — {sub}"
             for info, module in discover_modules():
                 if info["name"] == mname:
-                    from PySide6.QtWidgets import QMessageBox
                     try:
                         w = module.get_submodule_widget(sub)
                     except Exception as ex:
-                        # show the real error instead of falling back
                         QMessageBox.critical(self, "Failed to open submodule", f"{sub} error:\n{ex}")
-                        raise  # let the traceback appear in console
+                        raise
                     self._open_in_tab(title, w)
                     break
 

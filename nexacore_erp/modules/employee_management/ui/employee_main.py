@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QListWidgetItem, QHeaderView, QAbstractItemView, QSizePolicy, QListWidget,
     QInputDialog, QApplication, QDateTimeEdit
 )
+from PySide6.QtWidgets import QCalendarWidget  # add this near your other QtWidgets imports
 from PySide6.QtWidgets import QDoubleSpinBox
 
 # ---- shared date helpers ----
@@ -37,17 +38,31 @@ def _clean_text(s: str) -> str:
 
 
 class BlankableDateEdit(QDateEdit):
-    """Truly blank until a real date is set."""
-    def __init__(self, display_fmt: str = "yyyy-MM-dd", *a, **kw):
+    """Truly blank until set. Popup calendar defaults to today when blank.
+       Clear with Delete, Backspace, Esc, or double-click."""
+    class _PopupCalendar(QCalendarWidget):
+        def __init__(self, owner):
+            super().__init__()
+            self._owner = owner
+
+        def showEvent(self, ev):  # focus the calendar on today if the edit is blank
+            super().showEvent(ev)
+            if getattr(self._owner, "_blank", True):
+                self.setSelectedDate(QDate.currentDate())
+                self.setFocus()
+
+    def __init__(self, display_fmt: str = "dd/MM/yyyy", *a, **kw):
         self._fmt = display_fmt
         self._blank = True
         super().__init__(*a, **kw)
 
         self.setCalendarPopup(True)
+        self.setCalendarWidget(BlankableDateEdit._PopupCalendar(self))  # custom calendar
         self.setMinimumDate(QDate(1900, 1, 1))
-        self.setSpecialValueText(" ")
-        super().setDate(self.minimumDate())
+        self.setSpecialValueText(" ")           # render minimum date as blank
+        super().setDate(self.minimumDate())     # start blank
         self.setDisplayFormat(self._fmt)
+        self.setToolTip("Delete/Backspace/Esc to clear. Double-click to clear.")
         self.dateChanged.connect(self._unblank_on_change)
 
     def textFromDateTime(self, dt: QDateTime):  # type: ignore[override]
@@ -56,9 +71,9 @@ class BlankableDateEdit(QDateEdit):
         return QDateTimeEdit.textFromDateTime(self, dt)
 
     def _unblank_on_change(self, _):
-        if self._blank:
-            self._blank = False
-            self.update()
+        # stay blank if value equals the special minimum date
+        self._blank = (self.date() == self.minimumDate())
+        self.update()
 
     def clear(self):
         self._blank = True
@@ -75,6 +90,18 @@ class BlankableDateEdit(QDateEdit):
 
     def date_or_none(self):
         return None if self._blank else self.date()
+
+    # QoL: easy ways to blank in Edit mode
+    def keyPressEvent(self, ev):  # type: ignore[override]
+        if ev.key() in (Qt.Key_Delete, Qt.Key_Backspace, Qt.Key_Escape):
+            self.clear()
+            ev.accept()
+            return
+        super().keyPressEvent(ev)
+
+    def mouseDoubleClickEvent(self, ev):  # type: ignore[override]
+        self.clear()
+        ev.accept()
 
 
 # optional XLSX support
@@ -180,6 +207,15 @@ class EmployeeMainWidget(QWidget):
         self._build_holidays_tab()
         self._build_settings_tab()
 
+    # small helper: fetch dropdown option list for a category
+    def _opts(self, category: str) -> list[str]:
+        with SessionLocal() as s:
+            rows = s.query(DropdownOption)\
+                    .filter(DropdownOption.account_id == tenant_id(),
+                            DropdownOption.category == category)\
+                    .order_by(DropdownOption.value).all()
+        return [r.value for r in rows]
+
     # ---------------- Employee List ----------------
     def _build_employee_list_tab(self):
         host = QWidget()
@@ -222,30 +258,46 @@ class EmployeeMainWidget(QWidget):
                 w.textChanged.connect(self._apply_filters)
             elif isinstance(w, QComboBox):
                 w.currentTextChanged.connect(self._apply_filters)
+            elif isinstance(w, QSpinBox):
+                w.valueChanged.connect(self._apply_filters)
             grid.addWidget(w, row, 1)
 
+        # dropdown helpers with blank
+        def mk_dd(values: list[str]) -> QComboBox:
+            cb = QComboBox()
+            cb.addItem("")
+            for v in values or []:
+                cb.addItem(v)
+            return cb
+
         r = 0
-        add_filter(r, "Status", "employment_status",
-                   lambda: self._combo_with(["", "Active", "Non-Active"])); r += 1
+        add_filter(r, "Status", "employment_status", lambda: mk_dd(["Active", "Non-Active"])); r += 1
         add_filter(r, "Employee Code", "code", QLineEdit); r += 1
         add_filter(r, "Employee Name", "full_name", QLineEdit); r += 1
-        add_filter(r, "Department", "department", QLineEdit); r += 1
-        add_filter(r, "Position", "position", QLineEdit); r += 1
-        add_filter(r, "Employment Type", "employment_type",
-                   lambda: self._combo_with(["", "Full-Time", "Part-Time", "Contract"])); r += 1
-        add_filter(r, "ID Type", "id_type", QLineEdit); r += 1
+        add_filter(r, "Department", "department", lambda: mk_dd(self._opts("Department"))); r += 1
+        add_filter(r, "Position", "position",   lambda: mk_dd(self._opts("Position"))); r += 1
+        add_filter(r, "Employment Type", "employment_type", lambda: mk_dd(self._opts("Employment Type") or ["Full-Time", "Part-Time", "Contract"])); r += 1
+        add_filter(r, "ID Type", "id_type",     lambda: mk_dd(self._opts("ID Type"))); r += 1
         add_filter(r, "ID Number", "id_number", QLineEdit); r += 1
-        add_filter(r, "Country", "country", QLineEdit); r += 1
-        add_filter(r, "Residency", "residency",
-                   lambda: self._combo_with(["", "Citizen", "Permanent Resident", "Work Pass"])); r += 1
-        add_filter(r, "Age ≥", "age_min", QLineEdit); r += 1
-        add_filter(r, "Age ≤", "age_max", QLineEdit); r += 1
+        add_filter(r, "Country", "country",     lambda: mk_dd(self._opts("Country"))); r += 1
+        add_filter(r, "Residency", "residency", lambda: mk_dd(self._opts("Residency") or ["Citizen", "Permanent Resident", "Work Pass"])); r += 1
+
+        # Age numeric filters (not dropdown)
+        def mk_age():
+            sp = QSpinBox()
+            sp.setRange(0, 120)
+            sp.setSpecialValueText("")  # 0 acts as blank
+            sp.setValue(0)
+            return sp
+        add_filter(r, "Age ≥", "age_min", mk_age); r += 1
+        add_filter(r, "Age ≤", "age_max", mk_age); r += 1
+
         fbv.addLayout(grid)
 
         self.filter_area = QScrollArea()
         self.filter_area.setWidget(self.filter_box)
         self.filter_area.setWidgetResizable(True)
-        self.filter_area.setFixedHeight(160)
+        self.filter_area.setFixedHeight(180)
         self.filter_area.setVisible(False)
         lv.addWidget(self.filter_area)
 
@@ -302,11 +354,13 @@ class EmployeeMainWidget(QWidget):
                 return w.currentText().strip().lower()
             if isinstance(w, QLineEdit):
                 return w.text().strip().lower()
+            if isinstance(w, QSpinBox):
+                return "" if w.value() == 0 else str(w.value())
             return ""
 
         def to_int(val):
             try:
-                return int(val) if val else None
+                return int(val) if val != "" else None
             except Exception:
                 return None
 
@@ -1324,7 +1378,7 @@ class EmployeeEditor(QDialog):
 
         for name in (
                 "id_type", "gender", "race", "country", "residency",
-                "employment_status", "employment_pass", "department",
+                "employment_pass", "department",
                 "position", "employment_type", "holiday_group", "bank"
         ):
             w = getattr(self, name, None)
@@ -1349,6 +1403,25 @@ class EmployeeEditor(QDialog):
                     .distinct().all()
         return [r[0] for r in rows]
 
+    def _set_combo_value(self, cb: QComboBox, value: str | None):
+        """Ensure blank stays blank, and select exact value when present."""
+        txt = (value or "").strip()
+        if txt == "":
+            if cb.count() == 0 or cb.itemText(0) != "":
+                cb.insertItem(0, "")
+            cb.setCurrentIndex(0)
+            return
+        idx = cb.findText(txt, Qt.MatchExactly)
+        if idx < 0:
+            # keep list clean; do not inject new values here
+            # choose blank if available, else 0
+            if cb.count() > 0 and cb.itemText(0) == "":
+                cb.setCurrentIndex(0)
+            else:
+                cb.setCurrentIndex(0)
+        else:
+            cb.setCurrentIndex(idx)
+
     # --- Personal ---
     def _build_personal_tab(self):
         w = QWidget(); f = QFormLayout(w)
@@ -1356,21 +1429,21 @@ class EmployeeEditor(QDialog):
         self.email = QLineEdit()
         self.contact = QLineEdit()
         self.address = QLineEdit()
-        self.id_type = QComboBox(); self.id_type.addItems(self._opts("ID Type"))
+        self.id_type = QComboBox(); self.id_type.addItem(""); self.id_type.addItems(self._opts("ID Type"))
         self.id_number = QLineEdit()
-        self.gender = QComboBox(); self.gender.addItems(self._opts("Gender") or ["Male", "Female"])
+        self.gender = QComboBox(); self.gender.addItem(""); self.gender.addItems(self._opts("Gender") or ["Male", "Female"])
 
-        # blankable dates
-        self.dob = BlankableDateEdit()
+        # blankable dates with dd/MM/yyyy display and typing
+        self.dob = BlankableDateEdit(display_fmt="dd/MM/yyyy")
         self.dob.dateChanged.connect(self._update_age)
 
         self.age_lbl = QLabel("-")
-        self.race = QComboBox(); self.race.addItems(self._opts("Race"))
-        self.country = QComboBox(); self.country.addItems(self._opts("Country"))
-        self.residency = QComboBox(); self.residency.addItems(self._opts("Residency") or ["Citizen", "Permanent Resident", "Work Pass"])
+        self.race = QComboBox(); self.race.addItem(""); self.race.addItems(self._opts("Race"))
+        self.country = QComboBox(); self.country.addItem(""); self.country.addItems(self._opts("Country"))
+        self.residency = QComboBox(); self.residency.addItem(""); self.residency.addItems(self._opts("Residency") or ["Citizen", "Permanent Resident", "Work Pass"])
         self.residency.currentTextChanged.connect(self._toggle_pr_date)
 
-        self.pr_date = BlankableDateEdit()
+        self.pr_date = BlankableDateEdit(display_fmt="dd/MM/yyyy")
         self.pr_date.setEnabled(False)
 
         f.addRow("Full Name", self.full_name)
@@ -1426,24 +1499,25 @@ class EmployeeEditor(QDialog):
         self.employment_status = QComboBox()
         self.employment_status.addItems(["Active", "Non-Active"])
         self.employment_pass = QComboBox()
+        self.employment_pass.addItem("")
         self.employment_pass.addItems(self._opts("Employment Pass") or ["None", "S Pass", "Work Permit"])
         self.employment_pass.currentTextChanged.connect(self._toggle_wp)
         self.work_permit_number = QLineEdit()
         self.work_permit_number.setEnabled(False)
         self.department = QComboBox()
-        self.department.addItems(self._opts("Department"))
+        self.department.addItem(""); self.department.addItems(self._opts("Department"))
         self.position = QComboBox()
-        self.position.addItems(self._opts("Position"))
+        self.position.addItem(""); self.position.addItems(self._opts("Position"))
         self.employment_type = QComboBox()
-        self.employment_type.addItems(self._opts("Employment Type") or ["Full-Time", "Part-Time", "Contract"])
+        self.employment_type.addItem(""); self.employment_type.addItems(self._opts("Employment Type") or ["Full-Time", "Part-Time", "Contract"])
 
-        # blankable join and exit dates
-        self.join_date = BlankableDateEdit()
-        self.exit_date = BlankableDateEdit()
+        # blankable join and exit dates with dd/MM/yyyy
+        self.join_date = BlankableDateEdit(display_fmt="dd/MM/yyyy")
+        self.exit_date = BlankableDateEdit(display_fmt="dd/MM/yyyy")
         self.exit_date.dateChanged.connect(lambda _d: self._sync_status_from_exit())
 
         self.holiday_group = QComboBox()
-        self.holiday_group.addItems(self._holiday_groups())
+        self.holiday_group.addItem(""); self.holiday_group.addItems(self._holiday_groups())
 
         f.addRow("Employment Status", self.employment_status)
         f.addRow("Employment Pass", self.employment_pass)
@@ -1462,7 +1536,7 @@ class EmployeeEditor(QDialog):
     # --- Payment ---
     def _build_payment_tab(self):
         w = QWidget(); f = QFormLayout(w)
-        self.bank = QComboBox(); self.bank.addItems(self._opts("Bank"))
+        self.bank = QComboBox(); self.bank.addItem(""); self.bank.addItems(self._opts("Bank"))
         self.bank_account = QLineEdit()
         f.addRow("Bank", self.bank)
         f.addRow("Account Number", self.bank_account)
@@ -1546,18 +1620,19 @@ class EmployeeEditor(QDialog):
             self.email.setText(e.email or "")
             self.contact.setText(e.contact_number or "")
             self.address.setText(e.address or "")
-            self.id_type.setCurrentText(e.id_type or "")
+            self._set_combo_value(self.id_type, e.id_type)
             self.id_number.setText(e.id_number or "")
-            self.gender.setCurrentText(e.gender or "")
+            self._set_combo_value(self.gender, e.gender)
+
             if e.dob:
                 self.dob.set_real_date(QDate(e.dob.year, e.dob.month, e.dob.day))
                 self._update_age()
             else:
                 self.dob.clear()
                 self._update_age()
-            self.race.setCurrentText(e.race or "")
-            self.country.setCurrentText(e.country or "")
-            self.residency.setCurrentText(e.residency or "")
+            self._set_combo_value(self.race, e.race)
+            self._set_combo_value(self.country, e.country)
+            self._set_combo_value(self.residency, e.residency)
             self._toggle_pr_date(self.residency.currentText())
             if e.pr_date:
                 self.pr_date.set_real_date(QDate(e.pr_date.year, e.pr_date.month, e.pr_date.day))
@@ -1565,13 +1640,14 @@ class EmployeeEditor(QDialog):
                 self.pr_date.clear()
 
             # Employment
-            self.employment_status.setCurrentText(e.employment_status or "")
-            self.employment_pass.setCurrentText(e.employment_pass or "")
+            # keep default behaviour for status via exit-date rule
+            self.employment_status.setCurrentText(e.employment_status or "Active")
+            self._set_combo_value(self.employment_pass, e.employment_pass)
             self._toggle_wp(self.employment_pass.currentText())
             self.work_permit_number.setText(e.work_permit_number or "")
-            self.department.setCurrentText(getattr(e, "department", "") or "")
-            self.position.setCurrentText(e.position or "")
-            self.employment_type.setCurrentText(e.employment_type or "")
+            self._set_combo_value(self.department, getattr(e, "department", ""))
+            self._set_combo_value(self.position, e.position)
+            self._set_combo_value(self.employment_type, e.employment_type)
 
             if e.join_date:
                 self.join_date.set_real_date(QDate(e.join_date.year, e.join_date.month, e.join_date.day))
@@ -1584,10 +1660,10 @@ class EmployeeEditor(QDialog):
                 self.exit_date.clear()
             self._sync_status_from_exit()
 
-            self.holiday_group.setCurrentText(e.holiday_group or "")
+            self._set_combo_value(self.holiday_group, e.holiday_group)
 
             # Payment
-            self.bank.setCurrentText(e.bank or "")
+            self._set_combo_value(self.bank, e.bank)
             self.bank_account.setText(e.bank_account or "")
 
             # Remuneration
