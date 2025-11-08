@@ -9,6 +9,7 @@ import traceback
 import json
 
 from PySide6.QtCore import Qt, QDate
+from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import (
     QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QDateEdit,
     QTableWidget, QTableWidgetItem, QLineEdit, QPushButton, QHeaderView, QMessageBox,
@@ -493,9 +494,13 @@ class LeaveModuleWidget(QWidget):
         top.addWidget(self.btn_refresh_sum)
         top.addStretch(1)
 
+        # Headers: Employee Code, Employee, Entitlement, Used, Balance
         self.tbl_summary = QTableWidget(0, 5)
-        self.tbl_summary.setHorizontalHeaderLabels(["Emp ID", "Employee", "Entitlement", "Used", "Balance"])
-        self.tbl_summary.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_summary.setHorizontalHeaderLabels(["Employee Code", "Employee", "Entitlement", "Used", "Balance"])
+        hdr = self.tbl_summary.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeToContents)  # auto-resize to contents
+        hdr.setStretchLastSection(False)                        # do not fill to the right
+        hdr.setDefaultAlignment(Qt.AlignCenter)                 # center header text
         self.tbl_summary.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tbl_summary.setEditTriggers(QAbstractItemView.NoEditTriggers)
         layout.addWidget(self.tbl_summary)
@@ -524,14 +529,20 @@ class LeaveModuleWidget(QWidget):
             used = _used_days_total_year(session, emp.id, lt, y, include_adjustments=True)
             bal = round(ent - used, 2)
 
+            code = (getattr(emp, "code", None) or "").strip() or str(emp.id)
+            name_txt = str(getattr(emp, "full_name", getattr(emp, "name", emp.id)))
+
             r = self.tbl_summary.rowCount()
             self.tbl_summary.insertRow(r)
-            self.tbl_summary.setItem(r, 0, QTableWidgetItem(str(emp.id)))
-            name_txt = str(getattr(emp, "full_name", getattr(emp, "name", emp.id)))
-            self.tbl_summary.setItem(r, 1, QTableWidgetItem(name_txt))
-            self.tbl_summary.setItem(r, 2, QTableWidgetItem(f"{ent:.2f}"))
-            self.tbl_summary.setItem(r, 3, QTableWidgetItem(f"{used:.2f}"))
-            self.tbl_summary.setItem(r, 4, QTableWidgetItem(f"{bal:.2f}"))
+
+            vals = [code, name_txt, f"{ent:.2f}", f"{used:.2f}", f"{bal:.2f}"]
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(v)
+                it.setTextAlignment(Qt.AlignCenter)  # center each cell to match header
+                self.tbl_summary.setItem(r, c, it)
+
+        # ensure columns sized to content
+        self.tbl_summary.resizeColumnsToContents()
 
     def _populate_leave_types(self, combo: QComboBox):
         s = self.session
@@ -742,13 +753,15 @@ class LeaveModuleWidget(QWidget):
         top.addWidget(self.btn_reject)
         top.addWidget(self.btn_delete)
 
-        # Columns: (hidden ID) | Emp ID | Employee | Type | Start | Start Half | End | End Half | Used | Status | User
+        # Columns: (hidden ID) | Employee Code | Employee | Type | Start | Start Half | End | End Half | Used | Status | User
         self.tbl_details = QTableWidget(0, 11)
         self.tbl_details.setHorizontalHeaderLabels([
-            "ID", "Emp ID", "Employee", "Type", "Start", "Start Half", "End", "End Half", "Used", "Status", "User"
+            "ID", "Employee Code", "Employee", "Type", "Start", "Start Half", "End", "End Half", "Used", "Status", "User"
         ])
         self.tbl_details.setColumnHidden(0, True)
-        self.tbl_details.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        hdr = self.tbl_details.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.Stretch)
+        hdr.setDefaultAlignment(Qt.AlignCenter)  # center header text
         self.tbl_details.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tbl_details.setEditTriggers(QAbstractItemView.NoEditTriggers)
         layout.addWidget(self.tbl_details)
@@ -764,13 +777,12 @@ class LeaveModuleWidget(QWidget):
         lt = self.cmb_leave_type_d.currentText() or "Annual"
         y0, y1 = date(y, 1, 1), date(y, 12, 31)
 
-        # Build id -> name map once
-        emp_map = {
-            e.id: (e.full_name or f"Emp {e.id}")
-            for e in session.query(Employee)
-            .filter(Employee.account_id == tenant_id())
-            .all()
-        }
+        # Build id -> name/code maps once
+        emp_name_map: Dict[int, str] = {}
+        emp_code_map: Dict[int, str] = {}
+        for e in session.query(Employee).filter(Employee.account_id == tenant_id()).all():
+            emp_name_map[e.id] = (e.full_name or f"Emp {e.id}")
+            emp_code_map[e.id] = (getattr(e, "code", None) or "").strip() or str(e.id)
 
         self.tbl_details.setRowCount(0)
         try:
@@ -798,15 +810,24 @@ class LeaveModuleWidget(QWidget):
                     action_user = ""
                 r = self.tbl_details.rowCount()
                 self.tbl_details.insertRow(r)
-                name = emp_map.get(int(emp_id), f"Emp {emp_id}")
+                name = emp_name_map.get(int(emp_id), f"Emp {emp_id}")
+                code = emp_code_map.get(int(emp_id), str(emp_id))
                 vals = [
-                    str(_id), str(emp_id), name, str(leave_type),
-                    str(sd), str(sh), str(ed), str(eh),
-                    f"{float(used):.2f}" if used is not None else "0.00",
+                    str(_id), code, name, str(leave_type),
+                    str(sd), str(sh), str(eh if False else ed),  # preserve order while building list
+                    str(eh), f"{float(used):.2f}" if used is not None else "0.00",
                     str(status or ""), str(action_user or "")
                 ]
+                # fix positions: Start, Start Half, End, End Half
+                vals[4] = str(sd)
+                vals[5] = str(sh)
+                vals[6] = str(ed)
+                vals[7] = str(eh)
+
                 for c, v in enumerate(vals):
-                    self.tbl_details.setItem(r, c, QTableWidgetItem(v))
+                    it = QTableWidgetItem(v)
+                    it.setTextAlignment(Qt.AlignCenter)  # center cells
+                    self.tbl_details.setItem(r, c, it)
         except Exception:
             pass
 
@@ -1095,6 +1116,8 @@ class LeaveModuleWidget(QWidget):
             it.setFlags(Qt.ItemIsEnabled)
             it.setTextAlignment(Qt.AlignTop | Qt.AlignLeft)
             if labels:
+                # highlight cells that contain any names
+                it.setBackground(QColor("#FFF4C2"))  # light highlight
                 it.setToolTip("\n".join(labels))
             self.tbl_cal.setItem(r, c, it)
             day += 1
@@ -1122,13 +1145,15 @@ class LeaveModuleWidget(QWidget):
         self.btn_delete_uh.clicked.connect(self._delete_selected_user_history)
         top.addWidget(self.btn_delete_uh)
 
-        # Same columns as All Details (with hidden ID)
+        # Match All Details columns for consistency
         self.tbl_user_hist = QTableWidget(0, 11)
         self.tbl_user_hist.setHorizontalHeaderLabels([
-            "ID", "Emp ID", "Employee", "Type", "Start", "Start Half", "End", "End Half", "Used", "Status", "User"
+            "ID", "Employee Code", "Employee", "Type", "Start", "Start Half", "End", "End Half", "Used", "Status", "User"
         ])
         self.tbl_user_hist.setColumnHidden(0, True)
-        self.tbl_user_hist.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        hdr = self.tbl_user_hist.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.Stretch)
+        hdr.setDefaultAlignment(Qt.AlignCenter)
         self.tbl_user_hist.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tbl_user_hist.setEditTriggers(QAbstractItemView.NoEditTriggers)
         layout.addWidget(self.tbl_user_hist)
@@ -1143,12 +1168,11 @@ class LeaveModuleWidget(QWidget):
         y0, y1 = date(y, 1, 1), date(y, 12, 31)
         me = _current_user()
 
-        emp_map = {
-            e.id: (e.full_name or f"Emp {e.id}")
-            for e in session.query(Employee)
-            .filter(Employee.account_id == tenant_id())
-            .all()
-        }
+        emp_name_map: Dict[int, str] = {}
+        emp_code_map: Dict[int, str] = {}
+        for e in session.query(Employee).filter(Employee.account_id == tenant_id()).all():
+            emp_name_map[e.id] = (e.full_name or f"Emp {e.id}")
+            emp_code_map[e.id] = (getattr(e, "code", None) or "").strip() or str(e.id)
 
         self.tbl_user_hist.setRowCount(0)
         try:
@@ -1206,15 +1230,18 @@ class LeaveModuleWidget(QWidget):
                     action_user = row[9] if (len(row) > 9) else ""
                 r = self.tbl_user_hist.rowCount()
                 self.tbl_user_hist.insertRow(r)
-                name = emp_map.get(int(emp_id), f"Emp {emp_id}")
+                name = emp_name_map.get(int(emp_id), f"Emp {emp_id}")
+                code = emp_code_map.get(int(emp_id), str(emp_id))
                 vals = [
-                    str(_id), str(emp_id), name, str(leave_type),
+                    str(_id), code, name, str(leave_type),
                     str(sd), str(sh), str(ed), str(eh),
                     f"{float(used):.2f}" if used is not None else "0.00",
                     str(status or ""), str(action_user or "")
                 ]
                 for c, v in enumerate(vals):
-                    self.tbl_user_hist.setItem(r, c, QTableWidgetItem(v))
+                    it = QTableWidgetItem(v)
+                    it.setTextAlignment(Qt.AlignCenter)  # center cells
+                    self.tbl_user_hist.setItem(r, c, it)
         except Exception:
             pass
 

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QTableWidget,
     QTableWidgetItem, QPushButton, QComboBox, QFileDialog, QHeaderView, QGroupBox,
     QFormLayout, QTextBrowser, QSizePolicy, QScrollArea, QFrame, QDialog,
-    QDialogButtonBox
+    QDialogButtonBox, QAbstractItemView  # added
 )
 
 from ....core.database import get_employee_session as SessionLocal, get_main_session as MainSession
@@ -135,7 +135,7 @@ def _voucher_html(
     incent = float(getattr(emp, "incentives", 0.0) or 0.0)
     allow = float(getattr(emp, "allowance", 0.0) or 0.0)
 
-    pt_rate = float(getattr(emp, "parttime_rate", 0.0) or 0.0)
+    pt_rate = float(getattr(emp, "parttime_rate", getattr(emp, "part_time_rate", 0.0)) or 0.0)
     pt_hrs = float(getattr(emp, "part_time_hours", 0.0) or 0.0)
 
     ot_rate = float(getattr(emp, "overtime_rate", 0.0) or 0.0)
@@ -161,7 +161,7 @@ def _voucher_html(
         pt_rate = float(line.get("part_time_rate", pt_rate) or 0.0)
         pt_hrs = float(line.get("part_time_hours", pt_hrs) or 0.0)
         levy = float(line.get("levy", levy) or 0.0)
-        advance = float(line.get("advance", advance) or 0.0)  # <<< add this line
+        advance = float(line.get("advance", advance) or 0.0)
         shg = float(line.get("shg", shg) or 0.0)
         sdl = float(line.get("sdl", sdl) or 0.0)
         cpf_emp = float(line.get("cpf_emp", cpf_emp) or 0.0)
@@ -389,44 +389,94 @@ class SalaryModuleWidget(QWidget):
         host = QWidget()
         v = QVBoxLayout(host)
 
+        # Top filters: Name + Department
         top = QHBoxLayout()
-        top.addWidget(QLabel("Search"))
+        top.addWidget(QLabel("Name"))
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search by name")
-        self.search.textChanged.connect(self._reload_summary)
-        top.addWidget(self.search)
+        top.addWidget(self.search, 1)
+
+        top.addWidget(QLabel("Department"))
+        self.cmb_dept = QComboBox()
+        top.addWidget(self.cmb_dept, 1)
         top.addStretch(1)
         v.addLayout(top)
 
-        self.tbl = QTableWidget(0, 7)
+        # Table: add Department after Name; make non-editable; center headers and cells
+        self.tbl = QTableWidget(0, 8)
         self.tbl.setHorizontalHeaderLabels(
-            ["Code", "Name", "Basic", "Incentive", "Allowance", "Overtime Rate", "Part-Time Rate"]
+            ["Code", "Name", "Department", "Basic", "Incentive", "Allowance", "Overtime Rate", "Part-Time Rate"]
         )
         hdr = self.tbl.horizontalHeader()
         hdr.setStretchLastSection(False)
         hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hdr.setDefaultAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+        self.tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)  # non editable
         v.addWidget(self.tbl, 1)
 
+        # Wire signals
+        self.search.textChanged.connect(self._reload_summary)
+        self.cmb_dept.currentIndexChanged.connect(self._reload_summary)
+
+        # Init dropdowns + data
+        self._load_departments_for_summary()
         self.tabs.addTab(host, "Summary")
         self._reload_summary()
 
-    def _reload_summary(self):
-        q = (self.search.text() or "").lower()
+    def _load_departments_for_summary(self):
         with SessionLocal() as s:
-            rows = s.query(Employee).filter(Employee.account_id == tenant_id()).all()
+            vals = s.query(Employee.department).filter(Employee.account_id == tenant_id()).distinct().all()
+        depts = sorted({(v[0] or "").strip() for v in vals if (v[0] or "").strip()}, key=str.lower)
+        self.cmb_dept.blockSignals(True)
+        self.cmb_dept.clear()
+        self.cmb_dept.addItem("All")
+        self.cmb_dept.addItems(depts)
+        self.cmb_dept.blockSignals(False)
+
+    def _reload_summary(self):
+        # helpers
+        def _money(x) -> str:
+            try:
+                return f"$ {float(x or 0):,.2f}"
+            except Exception:
+                return "$ 0.00"
+
+        def _center(text: str) -> QTableWidgetItem:
+            it = QTableWidgetItem(text)
+            it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+            it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+            return it
+
+        name_q = (self.search.text() or "").strip().lower()
+        dept_q = self.cmb_dept.currentText() if getattr(self, "cmb_dept", None) and self.cmb_dept.count() else "All"
+
+        with SessionLocal() as s:
+            q = s.query(Employee).filter(Employee.account_id == tenant_id())
+            if dept_q and dept_q != "All":
+                q = q.filter(Employee.department == dept_q)
+            rows = q.all()
+
         self.tbl.setRowCount(0)
         for e in rows:
-            if q and q not in (e.full_name or "").lower():
+            if name_q and name_q not in (e.full_name or "").lower():
                 continue
             r = self.tbl.rowCount()
             self.tbl.insertRow(r)
-            self.tbl.setItem(r, 0, QTableWidgetItem(e.code or ""))
-            self.tbl.setItem(r, 1, QTableWidgetItem(e.full_name or ""))
-            self.tbl.setItem(r, 2, QTableWidgetItem(f"{(e.basic_salary or 0.0):.2f}"))
-            self.tbl.setItem(r, 3, QTableWidgetItem(f"{(e.incentives or 0.0):.2f}"))
-            self.tbl.setItem(r, 4, QTableWidgetItem(f"{(e.allowance or 0.0):.2f}"))
-            self.tbl.setItem(r, 5, QTableWidgetItem(f"{(e.overtime_rate or 0.0):.2f}"))
-            self.tbl.setItem(r, 6, QTableWidgetItem(f"{(e.parttime_rate or 0.0):.2f}"))
+
+            code = e.code or ""
+            name = e.full_name or ""
+            dept = e.department or ""
+
+            basic = _money(getattr(e, "basic_salary", 0.0))
+            incent = _money(getattr(e, "incentives", getattr(e, "incentive", 0.0)))
+            allow = _money(getattr(e, "allowance", 0.0))
+            ot_rate = _money(getattr(e, "overtime_rate", 0.0))
+            pt_rate = _money(getattr(e, "parttime_rate", getattr(e, "part_time_rate", 0.0)))
+
+            vals = [code, name, dept, basic, incent, allow, ot_rate, pt_rate]
+            for c, v in enumerate(vals):
+                self.tbl.setItem(r, c, _center(str(v)))
 
     def _build_salary_review_tab(self):
         from calendar import monthrange, month_name
@@ -617,7 +667,8 @@ class SalaryModuleWidget(QWidget):
         def _load_shg_race_map() -> dict:
             try:
                 with SessionLocal() as s:
-                    s.execute(text("""
+                    from sqlalchemy import text as _t
+                    s.execute(_t("""
                                    CREATE TABLE IF NOT EXISTS shg_race_map
                                    (
                                        account_id TEXT NOT NULL,
@@ -627,7 +678,7 @@ class SalaryModuleWidget(QWidget):
                                    );
                                    """))
                     s.commit()
-                    rows = s.execute(text("SELECT race, shg FROM shg_race_map WHERE account_id=:a"),
+                    rows = s.execute(_t("SELECT race, shg FROM shg_race_map WHERE account_id=:a"),
                                      {"a": str(tenant_id())}).fetchall()
                 return {(r.race or "").strip().lower(): (r.shg or "").strip().upper() for r in rows}
             except Exception:
@@ -709,7 +760,8 @@ class SalaryModuleWidget(QWidget):
         # ---------- DB bootstrapping ----------
         def _ensure_tables():
             with SessionLocal() as s:
-                s.execute(text("""
+                from sqlalchemy import text as _t
+                s.execute(_t("""
                                CREATE TABLE IF NOT EXISTS payroll_batches
                                (
                                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -722,7 +774,7 @@ class SalaryModuleWidget(QWidget):
                                    created_at   TEXT    DEFAULT CURRENT_TIMESTAMP
                                );
                                """))
-                s.execute(text("""
+                s.execute(_t("""
                                CREATE TABLE IF NOT EXISTS payroll_batch_lines
                                (
                                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -750,13 +802,13 @@ class SalaryModuleWidget(QWidget):
                                );
                                """))
                 try:
-                    cols = s.execute(text("PRAGMA table_info(payroll_batch_lines)")).fetchall()
+                    cols = s.execute(_t("PRAGMA table_info(payroll_batch_lines)")).fetchall()
                     have = {c.name for c in cols}
                     if "advance" not in have:
-                        s.execute(text("ALTER TABLE payroll_batch_lines ADD COLUMN advance REAL DEFAULT 0;"))
+                        s.execute(_t("ALTER TABLE payroll_batch_lines ADD COLUMN advance REAL DEFAULT 0;"))
                 except Exception:
                     pass
-                s.execute(text("""
+                s.execute(_t("""
                                CREATE TABLE IF NOT EXISTS shg_race_map
                                (
                                    account_id TEXT NOT NULL,
@@ -775,21 +827,22 @@ class SalaryModuleWidget(QWidget):
                 return f"{val_float:,.2f}"
             return f"${val_float:,.2f}"
 
+        from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem, QStyle
         class _NoBorderCenterDelegate(QStyledItemDelegate):
-            def paint(self, painter: QPainter, option: QStyleOptionViewItem, index):
+            def paint(self, painter, option, index):
                 opt = QStyleOptionViewItem(option)
                 opt.displayAlignment = Qt.AlignCenter | Qt.AlignVCenter
                 opt.state &= ~QStyle.State_HasFocus
                 super().paint(painter, opt, index)
 
         class _BorderedCenterDelegate(QStyledItemDelegate):
-            def paint(self, painter: QPainter, option: QStyleOptionViewItem, index):
+            def paint(self, painter, option, index):
+                from PySide6.QtGui import QPainter, QColor, QPen
                 opt = QStyleOptionViewItem(option)
                 opt.displayAlignment = Qt.AlignCenter | Qt.AlignVCenter
                 opt.state &= ~QStyle.State_HasFocus
                 super().paint(painter, opt, index)
-                # draw subtle border to emulate grid for editable cells
-                r: QRect = option.rect
+                r = option.rect
                 pen = QPen(QColor("#e5e7eb"))
                 pen.setWidth(1)
                 painter.save()
@@ -868,6 +921,7 @@ class SalaryModuleWidget(QWidget):
             tbl.setItem(r, c, it)
 
         def _load_batches():
+            from sqlalchemy import text
             tbl.setRowCount(0)
             with SessionLocal() as s:
                 rows = s.execute(text("""
@@ -936,6 +990,7 @@ class SalaryModuleWidget(QWidget):
         ]
         # Editable only these
         EDITABLE = {1, 2, 3, 4, 5, 6, 7, 8, 10, 11}
+        from PySide6.QtGui import QColor, QBrush
         DERIVED = set(range(len(COLS))) - (EDITABLE | {0})
         DERIVED_COLOR = QColor("#7a1f1f")  # dark red for uneditable fields
 
@@ -949,6 +1004,7 @@ class SalaryModuleWidget(QWidget):
             gross = basic + com + inc + allw + (ot_r * ot_h) + (pt_r * pt_h)
             # rules at last day of period
             from datetime import date as _date
+            from calendar import monthrange
             y = int(cb_year.currentText())
             m = cb_month.currentIndex() + 1
             on_date = _date(y, m, monthrange(y, m)[1])
@@ -1009,10 +1065,12 @@ class SalaryModuleWidget(QWidget):
                     b = s.execute(text("SELECT year, month, status FROM payroll_batches WHERE id=:i"),
                                   {"i": batch_id}).fetchone()
                     if not b:
+                        from PySide6.QtWidgets import QMessageBox
                         QMessageBox.warning(self, "Salary Review", "Batch not found.")
                         return
                     y, m, status = int(b.year), int(b.month), b.status
                     if status == "Submitted" and not read_only:
+                        from PySide6.QtWidgets import QMessageBox
                         QMessageBox.information(self, "Salary Review", "Batch is submitted. Opening in view mode.")
                         read_only = True
 
@@ -1098,6 +1156,7 @@ class SalaryModuleWidget(QWidget):
                         else:
                             it.setFlags(flags & ~Qt.ItemIsEditable)
                             if c in DERIVED:
+                                from PySide6.QtGui import QBrush
                                 it.setForeground(QBrush(DERIVED_COLOR))
                         grid.setItem(r, c, it)
 
@@ -1128,6 +1187,7 @@ class SalaryModuleWidget(QWidget):
                         row_emps.append(s.get(Employee, int(ln.employee_id)))
             else:
                 def _active_employees(y, m):
+                    from calendar import monthrange
                     som = date(y, m, 1)
                     eom = date(y, m, monthrange(y, m)[1])
                     rows = []
@@ -1178,6 +1238,7 @@ class SalaryModuleWidget(QWidget):
                         else:
                             it.setFlags(flags & ~Qt.ItemIsEditable)
                             if c in DERIVED:
+                                from PySide6.QtGui import QBrush
                                 it.setForeground(QBrush(DERIVED_COLOR))
                         grid.setItem(r, c, it)
 
@@ -1187,7 +1248,7 @@ class SalaryModuleWidget(QWidget):
                     putnum(4, getattr(e, "allowance", 0.0), True)
                     putnum(5, getattr(e, "overtime_rate", 0.0), True)
                     putnum(6, 0.0, True)  # OT Hours
-                    putnum(7, getattr(e, "parttime_rate", 0.0), True)
+                    putnum(7, getattr(e, "parttime_rate", getattr(e, "part_time_rate", 0.0)), True)
                     putnum(8, 0.0, True)  # PT Hours
                     putnum(10, getattr(e, "levy", 0.0), True)
                     putnum(11, getattr(e, "advance", 0.0), True)
@@ -1197,6 +1258,7 @@ class SalaryModuleWidget(QWidget):
                         it = QTableWidgetItem(_fmt_cell(c, 0.0))
                         it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
                         it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                        from PySide6.QtGui import QBrush
                         it.setForeground(QBrush(DERIVED_COLOR))
                         grid.setItem(r, c, it)
 
@@ -1225,6 +1287,7 @@ class SalaryModuleWidget(QWidget):
 
             def _persist(status=None):
                 totals = _recalc_totals(grid)
+                from sqlalchemy import text
                 with SessionLocal() as s:
                     if batch_id is None:
                         r = s.execute(text(
@@ -1275,6 +1338,7 @@ class SalaryModuleWidget(QWidget):
 
             def _on_clicked(btn):
                 t = btn.text().lower()
+                from PySide6.QtWidgets import QMessageBox
                 if "save" in t:
                     _persist("Draft")
                     QMessageBox.information(dlg, "Salary Review", "Saved.")
@@ -1300,6 +1364,7 @@ class SalaryModuleWidget(QWidget):
 
         def _edit():
             bid = _selected_batch_id()
+            from PySide6.QtWidgets import QMessageBox
             if not bid:
                 QMessageBox.information(host, "Salary Review", "Select a batch.")
                 return
@@ -1307,6 +1372,7 @@ class SalaryModuleWidget(QWidget):
 
         def _view():
             bid = _selected_batch_id()
+            from PySide6.QtWidgets import QMessageBox
             if not bid:
                 QMessageBox.information(host, "Salary Review", "Select a batch.")
                 return
@@ -1314,9 +1380,11 @@ class SalaryModuleWidget(QWidget):
 
         def _submit():
             bid = _selected_batch_id()
+            from PySide6.QtWidgets import QMessageBox
             if not bid:
                 QMessageBox.information(host, "Salary Review", "Select a batch.")
                 return
+            from sqlalchemy import text
             with SessionLocal() as s:
                 s.execute(text("UPDATE payroll_batches SET status='Submitted' WHERE id=:i"), {"i": bid})
                 s.commit()
@@ -1324,11 +1392,13 @@ class SalaryModuleWidget(QWidget):
 
         def _delete():
             bid = _selected_batch_id()
+            from PySide6.QtWidgets import QMessageBox
             if not bid:
                 QMessageBox.information(host, "Salary Review", "Select a batch.")
                 return
             if QMessageBox.question(host, "Delete",
                                     "Delete selected batch? This removes all lines.") == QMessageBox.Yes:
+                from sqlalchemy import text
                 with SessionLocal() as s:
                     s.execute(text("DELETE FROM payroll_batch_lines WHERE batch_id=:i"), {"i": bid})
                     s.execute(text("DELETE FROM payroll_batches WHERE id=:i"), {"i": bid})
@@ -2209,6 +2279,7 @@ class SalaryModuleWidget(QWidget):
 
             def _save_map():
                 with SessionLocal() as s:
+                    s.execute(text("DELETE FROM shg_race_map WHERE account_id=:a"), {"a": str(tenant_id())})
                     for r in range(tbl.rowCount()):
                         race = (tbl.item(r, 0).text() if tbl.item(r, 0) else "").strip()
                         shg = (tbl.cellWidget(r, 1).currentText() if tbl.cellWidget(r, 1) else "").strip().upper()
@@ -2220,6 +2291,7 @@ class SalaryModuleWidget(QWidget):
                                        UPDATE SET shg=excluded.shg
                                        """), {"a": str(tenant_id()), "r": race, "s": shg})
                     s.commit()
+                from PySide6.QtWidgets import QMessageBox
                 QMessageBox.information(dlg, "Race→SHG", "Saved.")
                 dlg.accept()
 
