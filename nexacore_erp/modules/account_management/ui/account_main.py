@@ -9,4 +9,5 @@ class AccountMainWidget(QWidget):
         tabs = QTabWidget(self)
         tabs.addTab(UsersTab(), "Users")
         tabs.addTab(RolesAccessTab(), "Roles & Access")
-        v = QVBoxLayout(self); v.addWidget(tabs)
+        v = QVBoxLayout(self)
+        v.addWidget(tabs)

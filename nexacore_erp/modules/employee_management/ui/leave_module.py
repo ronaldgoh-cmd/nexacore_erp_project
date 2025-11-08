@@ -13,12 +13,12 @@ from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import (
     QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QDateEdit,
     QTableWidget, QTableWidgetItem, QLineEdit, QPushButton, QHeaderView, QMessageBox,
-    QFormLayout, QAbstractItemView
+    QFormLayout, QAbstractItemView, QDialog, QDialogButtonBox
 )
 
 from ....core.database import get_employee_session as SessionLocal
 from ....core.tenant import id as tenant_id
-from ..models import Employee, LeaveDefault, WorkScheduleDay, Holiday, LeaveEntitlement
+from ..models import Employee, LeaveDefault, WorkScheduleDay, Holiday, LeaveEntitlement, SalaryHistory
 
 # ---------------- utils ----------------
 
@@ -323,12 +323,16 @@ def _adjustments_sum_for_year(session, emp_id: int, leave_type: str, year: int) 
         return 0.0
 
 def _used_days_total_year(session, emp_id: int, leave_type: str, year: int, include_adjustments: bool = True) -> float:
+    """Approved leave used within the calendar year.
+    If include_adjustments is True, subtract adjustments (so +2 entitlement lowers 'Used' by 2)."""
     y0 = date(year, 1, 1)
     y1 = date(year, 12, 31)
     used = _used_days_in_window(session, emp_id, leave_type, y0, y1)
     if include_adjustments:
-        used += _adjustments_sum_for_year(session, emp_id, leave_type, year)
+        adj = _adjustments_sum_for_year(session, emp_id, leave_type, year)
+        used = used - adj
     return round(float(used), 3)
+
 
 # ---------------- entitlement engine ----------------
 
@@ -498,9 +502,9 @@ class LeaveModuleWidget(QWidget):
         self.tbl_summary = QTableWidget(0, 5)
         self.tbl_summary.setHorizontalHeaderLabels(["Employee Code", "Employee", "Entitlement", "Used", "Balance"])
         hdr = self.tbl_summary.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.ResizeToContents)  # auto-resize to contents
-        hdr.setStretchLastSection(False)                        # do not fill to the right
-        hdr.setDefaultAlignment(Qt.AlignCenter)                 # center header text
+        hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hdr.setStretchLastSection(False)
+        hdr.setDefaultAlignment(Qt.AlignCenter)
         self.tbl_summary.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tbl_summary.setEditTriggers(QAbstractItemView.NoEditTriggers)
         layout.addWidget(self.tbl_summary)
@@ -538,10 +542,9 @@ class LeaveModuleWidget(QWidget):
             vals = [code, name_txt, f"{ent:.2f}", f"{used:.2f}", f"{bal:.2f}"]
             for c, v in enumerate(vals):
                 it = QTableWidgetItem(v)
-                it.setTextAlignment(Qt.AlignCenter)  # center each cell to match header
+                it.setTextAlignment(Qt.AlignCenter)
                 self.tbl_summary.setItem(r, c, it)
 
-        # ensure columns sized to content
         self.tbl_summary.resizeColumnsToContents()
 
     def _populate_leave_types(self, combo: QComboBox):
@@ -691,7 +694,6 @@ class LeaveModuleWidget(QWidget):
             if has_created or has_action:
                 cols = ["account_id","employee_id","leave_type","start_date","start_half",
                         "end_date","end_half","used_days","status","remarks"]
-                # Insert as Pending (not Approved)
                 vals = [acc, int(emp_id), leave_type, s.isoformat(), sh, e.isoformat(), eh, float(used), "Pending", self.txt_remarks.text().strip()]
                 if has_created:
                     cols.append("created_by");  vals.append(_current_user())
@@ -711,7 +713,7 @@ class LeaveModuleWidget(QWidget):
             self._refresh_details()
             self._refresh_user_history()
             self._refresh_summary()
-            self._refresh_calendar()  # calendar auto-refresh after apply
+            self._refresh_calendar()
             self._recalculate_used()
             self._update_available()
         except Exception as ex:
@@ -761,7 +763,7 @@ class LeaveModuleWidget(QWidget):
         self.tbl_details.setColumnHidden(0, True)
         hdr = self.tbl_details.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.Stretch)
-        hdr.setDefaultAlignment(Qt.AlignCenter)  # center header text
+        hdr.setDefaultAlignment(Qt.AlignCenter)
         self.tbl_details.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tbl_details.setEditTriggers(QAbstractItemView.NoEditTriggers)
         layout.addWidget(self.tbl_details)
@@ -814,19 +816,13 @@ class LeaveModuleWidget(QWidget):
                 code = emp_code_map.get(int(emp_id), str(emp_id))
                 vals = [
                     str(_id), code, name, str(leave_type),
-                    str(sd), str(sh), str(eh if False else ed),  # preserve order while building list
-                    str(eh), f"{float(used):.2f}" if used is not None else "0.00",
+                    str(sd), str(sh), str(ed), str(eh),
+                    f"{float(used):.2f}" if used is not None else "0.00",
                     str(status or ""), str(action_user or "")
                 ]
-                # fix positions: Start, Start Half, End, End Half
-                vals[4] = str(sd)
-                vals[5] = str(sh)
-                vals[6] = str(ed)
-                vals[7] = str(eh)
-
                 for c, v in enumerate(vals):
                     it = QTableWidgetItem(v)
-                    it.setTextAlignment(Qt.AlignCenter)  # center cells
+                    it.setTextAlignment(Qt.AlignCenter)
                     self.tbl_details.setItem(r, c, it)
         except Exception:
             pass
@@ -911,8 +907,10 @@ class LeaveModuleWidget(QWidget):
     # ----- Adjustments -----
     def _init_adjustments_tab(self):
         w = self._adjustments_tab
-        form = QFormLayout(w)
+        root = QVBoxLayout(w)
 
+        # Form row
+        form = QFormLayout()
         self.cmb_emp_adj = QComboBox(); self._populate_employees(self.cmb_emp_adj)
         form.addRow("Employee", self.cmb_emp_adj)
 
@@ -934,18 +932,65 @@ class LeaveModuleWidget(QWidget):
         self.ed_remarks_adj = QLineEdit()
         form.addRow("Remarks", self.ed_remarks_adj)
 
+        btn_row = QHBoxLayout()
         self.btn_add_adj = QPushButton("Add Adjustment")
         self.btn_add_adj.clicked.connect(self._save_adjustment)
-        form.addRow(self.btn_add_adj)
+        self.btn_clear_adj = QPushButton("Clear")
+        self.btn_clear_adj.clicked.connect(self._clear_adj_form)
+        self.btn_edit_adj = QPushButton("Edit Selected")
+        self.btn_edit_adj.clicked.connect(self._edit_adjustment)
+        self.btn_del_adj = QPushButton("Delete Selected")
+        self.btn_del_adj.clicked.connect(self._delete_adjustment)
+        btn_row.addWidget(self.btn_add_adj)
+        btn_row.addWidget(self.btn_clear_adj)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.btn_edit_adj)
+        btn_row.addWidget(self.btn_del_adj)
+
+        root.addLayout(form)
+        root.addLayout(btn_row)
+
+        # Table: ID(hidden), Emp Code, Employee, Type, Year, Date, Days, Remarks, Created
+        self.tbl_adj = QTableWidget(0, 9)
+        self.tbl_adj.setHorizontalHeaderLabels([
+            "ID", "Employee Code", "Employee", "Type", "Year", "Date", "Days", "Remarks", "Created"
+        ])
+        self.tbl_adj.setColumnHidden(0, True)
+        hdr = self.tbl_adj.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hdr.setStretchLastSection(False)
+        hdr.setDefaultAlignment(Qt.AlignCenter)
+        self.tbl_adj.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl_adj.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        root.addWidget(self.tbl_adj, 1)
+
+        # Hooks to refresh table when filters change
+        self.cmb_emp_adj.currentIndexChanged.connect(self._refresh_adjustments_table)
+        self.cmb_leave_type_adj.currentIndexChanged.connect(self._refresh_adjustments_table)
+        self.cmb_year_adj.currentIndexChanged.connect(self._refresh_adjustments_table)
+        self.tbl_adj.cellDoubleClicked.connect(lambda _r, _c: self._edit_adjustment())
+
+        # initial load
+        self._refresh_adjustments_table()
+
+    def _clear_adj_form(self):
+        self.de_adj.setDate(QDate.currentDate())
+        self.ed_days_adj.clear()
+        self.ed_remarks_adj.clear()
 
     def _save_adjustment(self):
         session = self.session
         try:
             emp_id = self.cmb_emp_adj.currentData()
+            if emp_id is None:
+                QMessageBox.warning(self, "Missing", "Select employee."); return
             lt = self.cmb_leave_type_adj.currentText() or "Annual"
             y = int(self.cmb_year_adj.currentText())
             d = self.de_adj.date().toPython()
-            days = float(self.ed_days_adj.text().strip())
+            try:
+                days = float((self.ed_days_adj.text() or "0").strip())
+            except Exception:
+                QMessageBox.warning(self, "Invalid", "Days must be a number."); return
             remarks = self.ed_remarks_adj.text().strip()
 
             _ensure_leave_tables(session)
@@ -961,13 +1006,177 @@ class LeaveModuleWidget(QWidget):
             )
             raw.commit()
             QMessageBox.information(self, "Saved", "Adjustment recorded.")
-            self._refresh_summary()   # keep summary up to date
+            self._refresh_adjustments_table()
+            self._refresh_summary()
             self._refresh_calendar()
             self._refresh_details()
             self._refresh_user_history()
         except Exception as ex:
             traceback.print_exc()
             QMessageBox.critical(self, "Error", f"Failed to save.\n{ex}")
+
+    def _refresh_adjustments_table(self):
+        session = self.session
+        emp_id = self.cmb_emp_adj.currentData()
+        lt = self.cmb_leave_type_adj.currentText() or ""
+        try:
+            y = int(self.cmb_year_adj.currentText())
+        except Exception:
+            y = _today().year
+
+        # maps for code and name
+        emp_name_map: Dict[int, str] = {}
+        emp_code_map: Dict[int, str] = {}
+        for e in session.query(Employee).filter(Employee.account_id == tenant_id()).all():
+            emp_name_map[e.id] = (e.full_name or f"Emp {e.id}")
+            emp_code_map[e.id] = (getattr(e, "code", None) or "").strip() or str(e.id)
+
+        self.tbl_adj.setRowCount(0)
+        try:
+            acc = tenant_id()
+            raw = session.connection().connection
+            cur = raw.cursor()
+
+            base = "SELECT id, employee_id, leave_type, year, date, days, remarks, created_at FROM leave_adjustments WHERE account_id = ?"
+            args: List[object] = [acc]
+            if emp_id is not None:
+                base += " AND employee_id = ?"; args.append(int(emp_id))
+            if lt:
+                base += " AND leave_type = ?"; args.append(lt)
+            base += " AND year = ?"; args.append(int(y))
+            base += " ORDER BY date(date) ASC, id ASC"
+
+            cur.execute(base, tuple(args))
+            rows = cur.fetchall()
+
+            for row in rows:
+                _id, e_id, ltyp, yy, dt_s, days, rm, created = row
+                name = emp_name_map.get(int(e_id), f"Emp {e_id}")
+                code = emp_code_map.get(int(e_id), str(e_id))
+                try:
+                    dshow = date.fromisoformat(str(dt_s)).strftime("%d/%m/%Y")
+                except Exception:
+                    dshow = str(dt_s)
+                vals = [
+                    str(_id), code, name, str(ltyp), str(yy),
+                    dshow, f"{float(days):.2f}", str(rm or ""), str(created or "")
+                ]
+                r = self.tbl_adj.rowCount()
+                self.tbl_adj.insertRow(r)
+                for c, v in enumerate(vals):
+                    it = QTableWidgetItem(v)
+                    it.setTextAlignment(Qt.AlignCenter)
+                    self.tbl_adj.setItem(r, c, it)
+        except Exception:
+            pass
+
+    def _current_adj_id(self) -> Optional[int]:
+        idxs = self.tbl_adj.selectionModel().selectedRows()
+        if not idxs:
+            return None
+        r = idxs[0].row()
+        it = self.tbl_adj.item(r, 0)
+        try:
+            return int(it.text()) if it else None
+        except Exception:
+            return None
+
+    def _edit_adjustment(self):
+        adj_id = self._current_adj_id()
+        if adj_id is None:
+            QMessageBox.information(self, "Edit", "Select a row to edit.")
+            return
+
+        # pull current values from table
+        r = self.tbl_adj.currentRow()
+        cur_emp_name = self.tbl_adj.item(r, 2).text() if self.tbl_adj.item(r, 2) else ""
+        cur_type = self.tbl_adj.item(r, 3).text() if self.tbl_adj.item(r, 3) else ""
+        cur_year = self.tbl_adj.item(r, 4).text() if self.tbl_adj.item(r, 4) else ""
+        cur_date = self.tbl_adj.item(r, 5).text() if self.tbl_adj.item(r, 5) else ""
+        cur_days = self.tbl_adj.item(r, 6).text() if self.tbl_adj.item(r, 6) else ""
+        cur_rm = self.tbl_adj.item(r, 7).text() if self.tbl_adj.item(r, 7) else ""
+
+        # dialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Edit Adjustment")
+        fl = QFormLayout(dlg)
+
+        lbl_emp = QLabel(cur_emp_name)
+        lbl_type = QLabel(cur_type)
+        lbl_year = QLabel(cur_year)
+        fl.addRow("Employee", lbl_emp)
+        fl.addRow("Leave type", lbl_type)
+        fl.addRow("Year", lbl_year)
+
+        de = QDateEdit(); de.setCalendarPopup(True)
+        try:
+            d = datetime.strptime(cur_date, "%d/%m/%Y").date()
+            de.setDate(QDate(d.year, d.month, d.day))
+        except Exception:
+            de.setDate(QDate.currentDate())
+
+        ed_days = QLineEdit(cur_days)
+        ed_rm = QLineEdit(cur_rm)
+        fl.addRow("Date", de)
+        fl.addRow("Days", ed_days)
+        fl.addRow("Remarks", ed_rm)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        fl.addRow(bb)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        try:
+            dq = de.date()
+            d_iso = f"{dq.year():04d}-{dq.month():02d}-{dq.day():02d}"
+            days_val = float((ed_days.text() or "0").strip())
+        except Exception:
+            QMessageBox.warning(self, "Edit", "Invalid inputs.")
+            return
+
+        raw = self.session.connection().connection
+        cur = raw.cursor()
+        try:
+            cur.execute(
+                "UPDATE leave_adjustments SET date=?, days=?, remarks=? WHERE id=? AND account_id=?",
+                (d_iso, days_val, ed_rm.text().strip(), int(adj_id), tenant_id())
+            )
+            raw.commit()
+        except Exception as ex:
+            QMessageBox.warning(self, "Edit", f"Failed: {ex}")
+            return
+
+        self._refresh_adjustments_table()
+        self._refresh_summary()
+        self._refresh_calendar()
+        self._refresh_details()
+        self._refresh_user_history()
+
+    def _delete_adjustment(self):
+        adj_id = self._current_adj_id()
+        if adj_id is None:
+            QMessageBox.information(self, "Delete", "Select a row to delete.")
+            return
+        if QMessageBox.question(self, "Delete", "Delete selected adjustment?") != QMessageBox.Yes:
+            return
+
+        raw = self.session.connection().connection
+        cur = raw.cursor()
+        try:
+            cur.execute("DELETE FROM leave_adjustments WHERE id=? AND account_id=?", (int(adj_id), tenant_id()))
+            raw.commit()
+        except Exception as ex:
+            QMessageBox.warning(self, "Delete", f"Failed: {ex}")
+            return
+
+        self._refresh_adjustments_table()
+        self._refresh_summary()
+        self._refresh_calendar()
+        self._refresh_details()
+        self._refresh_user_history()
 
     # ----- Calendar -----
     def _init_calendar_tab(self):
@@ -1116,8 +1325,7 @@ class LeaveModuleWidget(QWidget):
             it.setFlags(Qt.ItemIsEnabled)
             it.setTextAlignment(Qt.AlignTop | Qt.AlignLeft)
             if labels:
-                # highlight cells that contain any names
-                it.setBackground(QColor("#FFF4C2"))  # light highlight
+                it.setBackground(QColor("#FFF4C2"))
                 it.setToolTip("\n".join(labels))
             self.tbl_cal.setItem(r, c, it)
             day += 1
@@ -1183,7 +1391,6 @@ class LeaveModuleWidget(QWidget):
             has_action = _has_column(raw, "leave_applications", "action_user")
 
             if has_created:
-                # Filter by creator (owner of application)
                 cur.execute(
                     f"""
                     SELECT id, employee_id, leave_type, start_date, start_half, end_date, end_half, used_days, status
@@ -1197,7 +1404,6 @@ class LeaveModuleWidget(QWidget):
                     (acc, me, y0.isoformat(), y1.isoformat())
                 )
             elif has_action:
-                # Fallback: approximate owner as last action user
                 cur.execute(
                     f"""
                     SELECT id, employee_id, leave_type, start_date, start_half, end_date, end_half, used_days, status, action_user
@@ -1210,7 +1416,6 @@ class LeaveModuleWidget(QWidget):
                     (acc, me, y0.isoformat(), y1.isoformat())
                 )
             else:
-                # No user columns — show all (cannot filter by user)
                 cur.execute(
                     """
                     SELECT id, employee_id, leave_type, start_date, start_half, end_date, end_half, used_days, status
@@ -1240,7 +1445,7 @@ class LeaveModuleWidget(QWidget):
                 ]
                 for c, v in enumerate(vals):
                     it = QTableWidgetItem(v)
-                    it.setTextAlignment(Qt.AlignCenter)  # center cells
+                    it.setTextAlignment(Qt.AlignCenter)
                     self.tbl_user_hist.setItem(r, c, it)
         except Exception:
             pass
