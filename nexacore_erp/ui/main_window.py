@@ -1,3 +1,4 @@
+# nexacore_erp/ui/main_window.py
 from PySide6.QtWidgets import (
     QMainWindow, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QSizePolicy, QDialog, QLineEdit, QTreeWidget, QTreeWidgetItem,
@@ -7,18 +8,21 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QAction, QPixmap
 from PySide6.QtCore import QTimer, Qt
 
-from ..ui.login_dialog import LoginDialog
+# Do NOT import LoginDialog here; only in do_logout() to avoid double prompt.
 from ..ui.company_settings_dialog import CompanySettingsDialog
 from ..ui.user_settings_dialog import UserSettingsDialog
 from ..ui.about_dialog import AboutDialog
 from ..core.database import SessionLocal
-from ..core.models import User, UserSettings, ModuleState, CompanySettings
+from ..core.models import UserSettings, ModuleState, CompanySettings
 from ..core.plugins import discover_modules
 from ..core.permissions import has_permission, can_view
 from ..core import themes
 
+from ..core.auth import get_current_user, authenticate, set_current_user
+
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from types import SimpleNamespace
 import re
 
 
@@ -71,8 +75,8 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self._tick_clock)
         self.timer.start(1000)
 
-        # ---------- Flow ----------
-        self._login_flow()
+        # ---------- Bootstrap from already-authenticated user ----------
+        self._bootstrap_user_from_auth_state()
         self._rebuild_nav()
         self._refresh_identity()
 
@@ -132,14 +136,14 @@ class MainWindow(QMainWindow):
         row3.setContentsMargins(0, 0, 0, 0)
         row3.setSpacing(12)
 
+        self.nav_toggle_btn = QPushButton("Toggle Navigation", host)
+        self.nav_toggle_btn.clicked.connect(self.toggle_nav)
         self.company_act_btn = QPushButton("Company Settings", host)
         self.company_act_btn.clicked.connect(self.open_company_settings)
         self.modules_act_btn = QPushButton("Install/Enable Modules", host)
         self.modules_act_btn.clicked.connect(self.open_module_manager)
         self.about_act_btn = QPushButton("About", host)
         self.about_act_btn.clicked.connect(lambda: AboutDialog().exec())
-        self.nav_toggle_btn = QPushButton("Toggle Navigation", host)
-        self.nav_toggle_btn.clicked.connect(self.toggle_nav)
         row3.addWidget(self.nav_toggle_btn)
         row3.addWidget(self.company_act_btn)
         row3.addWidget(self.modules_act_btn)
@@ -193,94 +197,58 @@ class MainWindow(QMainWindow):
             return f"Etc/GMT{inv}{num}"
         return key
 
-    def _login_flow(self):
-        while True:
-            dlg = LoginDialog()
-            if dlg.exec() != QDialog.Accepted:
-                self.close()
-                return
+    def _is_ephemeral(self) -> bool:
+        try:
+            return getattr(self.user, "id", 0) < 0
+        except Exception:
+            return False
 
-            try:
-                if hasattr(dlg, "credentials"):
-                    username, password = dlg.credentials()
-                else:
-                    username = dlg.ed_user.text().strip()
-                    password = dlg.ed_pass.text()
-            except Exception:
-                username, password = "", ""
-
-            username = (username or "").strip()
-            password = password or ""
-
-            # DEV BYPASS
-            if username.lower() == "admin" and password == "admin123":
-                with SessionLocal() as s:
-                    user = s.query(User).filter(User.username == "admin").first()
-                    if not user:
-                        try:
-                            from ..core.auth import hash_password as _hash
-                        except Exception:
-                            _hash = None
-                        pwhash = _hash("admin123") if _hash else "admin123"
-                        user = User(username="admin", password_hash=pwhash, role="superadmin", account_id="default")
-                        s.add(user); s.commit(); s.refresh(user)
-                    us = s.query(UserSettings).filter(UserSettings.user_id == user.id).first()
-                    if not us:
-                        us = UserSettings(user_id=user.id, account_id="default", timezone="Asia/Singapore", theme="light")
-                        s.add(us); s.commit(); s.refresh(us)
-                self.user = user
-                self.user_settings = us
-                self.account_btn.setText(user.username)
-                self.company_act_btn.setEnabled(True)
-                self.modules_act_btn.setEnabled(True)
-                self._apply_theme()
-                break
-
-            if not username:
-                QMessageBox.warning(self, "Login failed", "Username is required.")
-                continue
-
-            with SessionLocal() as s:
-                user = s.query(User).filter(User.username == username).first()
-
-            ok = False
-            if user:
-                try:
-                    from ..core.auth import verify_password as _verify_password
-                except Exception:
-                    _verify_password = None
-                try:
-                    if _verify_password:
-                        ok = _verify_password(password, user.password_hash)
-                    else:
-                        ok = (password == user.password_hash)
-                except Exception:
-                    ok = False
-
-            if not ok:
-                QMessageBox.warning(self, "Login failed", "Invalid username or password.")
-                continue
-
-            self.user = user
-            with SessionLocal() as s:
-                self.user_settings = s.query(UserSettings).filter(
-                    UserSettings.user_id == user.id
-                ).first()
-                if not self.user_settings:
-                    self.user_settings = UserSettings(user_id=user.id, account_id="default",
-                                                      timezone="Asia/Singapore", theme="light")
-                    s.add(self.user_settings); s.commit(); s.refresh(self.user_settings)
-
-            self.account_btn.setText(user.username)
-            self.company_act_btn.setEnabled(user.role in ("admin", "superadmin"))
-            self.modules_act_btn.setEnabled(
-                user.role == "superadmin" or has_permission(user.id, "modules.install")
-            )
+    def _bootstrap_user_from_auth_state(self):
+        """
+        Read authenticated user from auth. If ephemeral superadministrator,
+        do not write anything to DB.
+        """
+        self.user = get_current_user()
+        if not self.user:
+            self.account_btn.setText("Not logged in")
+            self.company_act_btn.setEnabled(False)
+            self.modules_act_btn.setEnabled(False)
+            self.user_settings = None
             self._apply_theme()
-            break
+            return
+
+        if self._is_ephemeral():
+            # Superadministrator session without DB side effects
+            self.user_settings = SimpleNamespace(timezone="Asia/Singapore", theme="light")
+            self.account_btn.setText(self.user.username or "superadministrator")
+            self.company_act_btn.setEnabled(True)
+            self.modules_act_btn.setEnabled(True)
+            self._apply_theme()
+            return
+
+        # DB user: ensure settings in DB
+        with SessionLocal() as s:
+            us = s.query(UserSettings).filter(UserSettings.user_id == self.user.id).first()
+            if not us:
+                us = UserSettings(
+                    user_id=self.user.id,
+                    account_id=getattr(self.user, "account_id", "default") or "default",
+                    timezone="Asia/Singapore",
+                    theme="light",
+                )
+                s.add(us); s.commit(); s.refresh(us)
+            self.user_settings = us
+
+        self.account_btn.setText(self.user.username or "user")
+        self.company_act_btn.setEnabled(self.user.role in ("admin", "superadmin"))
+        self.modules_act_btn.setEnabled(
+            self.user.role == "superadmin" or has_permission(self.user.id, "modules.install")
+        )
+        self._apply_theme()
 
     def _apply_theme(self):
         if not self.user_settings:
+            self.setStyleSheet(themes.LIGHT)
             return
         self.setStyleSheet(themes.DARK if self.user_settings.theme == "dark" else themes.LIGHT)
 
@@ -388,13 +356,16 @@ class MainWindow(QMainWindow):
 
     # ===== Actions =====
     def open_company_settings(self):
-        if self.user.role not in ("admin", "superadmin"):
+        if not self.user or self.user.role not in ("admin", "superadmin"):
             return
         CompanySettingsDialog(self).exec()
         self._refresh_identity()
 
     def open_user_settings(self):
         if not self.user_settings:
+            return
+        if self._is_ephemeral():
+            QMessageBox.information(self, "Not available", "User settings are not persisted for superadministrator.")
             return
         d = UserSettingsDialog(self.user_settings.timezone, self.user_settings.theme)
         if d.exec() == QDialog.Accepted:
@@ -409,9 +380,50 @@ class MainWindow(QMainWindow):
             self._apply_theme()
 
     def do_logout(self):
+        """
+        Clear current user and re-login once, here.
+        This is the ONLY place in MainWindow that may show the login dialog,
+        and it occurs only after an explicit logout.
+        """
+        set_current_user(None)
         self.user = None
         self.user_settings = None
-        self._login_flow()
+        self.account_btn.setText("Not logged in")
+        self.company_act_btn.setEnabled(False)
+        self.modules_act_btn.setEnabled(False)
+        self._apply_theme()
+
+        try:
+            from ..ui.login_dialog import LoginDialog
+        except Exception:
+            return
+
+        dlg = LoginDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        try:
+            if hasattr(dlg, "credentials"):
+                username, password = dlg.credentials()
+            else:
+                username = dlg.ed_user.text().strip()
+                password = dlg.ed_pass.text()
+        except Exception:
+            username, password = "", ""
+
+        username = (username or "").strip()
+        password = password or ""
+        if not username:
+            QMessageBox.warning(self, "Login failed", "Username is required.")
+            return
+
+        u = authenticate(username, password)
+        if not u:
+            QMessageBox.warning(self, "Login failed", "Invalid username or password, or account is inactive.")
+            return
+
+        set_current_user(u)
+        self._bootstrap_user_from_auth_state()
         self._rebuild_nav()
         self._refresh_identity()
 

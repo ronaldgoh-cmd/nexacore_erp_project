@@ -1,11 +1,14 @@
-# ui/login_dialog.py
 from __future__ import annotations
+from typing import Optional, Tuple
+
 from PySide6.QtCore import Qt, QSettings
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QCheckBox,
     QPushButton, QDialogButtonBox, QWidget, QFormLayout
 )
 from PySide6.QtGui import QPixmap
+
+from nexacore_erp.core.auth import authenticate, set_current_user
 
 class CreateAccountDialog(QDialog):
     def __init__(self, parent: QWidget | None = None):
@@ -22,20 +25,23 @@ class CreateAccountDialog(QDialog):
         form.addRow("Password", self.ed_pass)
         form.addRow("Repeat Password", self.ed_pass2)
         layout.addLayout(form)
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        # Leave handlers empty for now
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
-        layout.addWidget(self.buttons)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 class LoginDialog(QDialog):
     def __init__(self, parent: QWidget | None = None, logo_pixmap: QPixmap | None = None):
         super().__init__(parent)
         self.setWindowTitle("NexaCore — Sign in")
+        self.setModal(True)
         self.settings = QSettings("NexaCore", "ERP")
+        self._who: Optional[Tuple[str, int]] = None
+        self._submitting = False
 
         root = QVBoxLayout(self)
-        # Header with centered logo
+
+        # Logo
         self.logo = QLabel()
         self.logo.setMinimumSize(72, 72)
         self.logo.setAlignment(Qt.AlignCenter)
@@ -52,35 +58,46 @@ class LoginDialog(QDialog):
         form.addRow("Password", self.ed_pass)
         root.addLayout(form)
 
-        # Remember on this PC
-        chk_row = QHBoxLayout()
+        # Remember
+        row = QHBoxLayout()
         self.cb_user = QCheckBox("Remember username on this PC")
         self.cb_pass = QCheckBox("Remember password on this PC")
-        chk_row.addWidget(self.cb_user)
-        chk_row.addWidget(self.cb_pass)
-        chk_row.addStretch(1)
-        root.addLayout(chk_row)
+        row.addWidget(self.cb_user); row.addWidget(self.cb_pass); row.addStretch(1)
+        root.addLayout(row)
 
-        # Footer buttons
+        # Error
+        self.lbl_error = QLabel("")
+        self.lbl_error.setStyleSheet("color:#b00020;")
+        root.addWidget(self.lbl_error)
+
+        # Create account
         btn_row = QHBoxLayout()
         self.btn_create = QPushButton("Create Account")
         self.btn_create.clicked.connect(self._open_create_account)
-        btn_row.addWidget(self.btn_create)
-        btn_row.addStretch(1)
+        btn_row.addWidget(self.btn_create); btn_row.addStretch(1)
         root.addLayout(btn_row)
 
+        # Buttons
         self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.buttons.accepted.connect(self._on_login_clicked)
         self.buttons.rejected.connect(self.reject)
+        self.buttons.button(QDialogButtonBox.Ok).setAutoDefault(True)
+        self.buttons.button(QDialogButtonBox.Ok).setDefault(True)
         root.addWidget(self.buttons)
 
         self._load_cached_fields()
 
-    # Public API you likely already call:
+    # Public
     def credentials(self) -> tuple[str, str]:
         return self.ed_user.text().strip(), self.ed_pass.text()
 
-    # ----- internals
+    def result_identity(self) -> Optional[Tuple[str, int]]:
+        return self._who
+
+    def show_error(self, msg: str) -> None:
+        self.lbl_error.setText(msg)
+
+    # Internals
     def _load_cached_fields(self) -> None:
         if self.settings.value("login/remember_user", False, bool):
             self.ed_user.setText(self.settings.value("login/username", "", str))
@@ -96,7 +113,6 @@ class LoginDialog(QDialog):
         else:
             self.settings.setValue("login/remember_user", False)
             self.settings.remove("login/username")
-
         if self.cb_pass.isChecked():
             self.settings.setValue("login/remember_pass", True)
             self.settings.setValue("login/password", self.ed_pass.text())
@@ -105,9 +121,25 @@ class LoginDialog(QDialog):
             self.settings.remove("login/password")
 
     def _on_login_clicked(self) -> None:
-        # Do not change your existing auth flow; only cache decisions.
-        self._cache_now()
-        self.accept()
+        if self._submitting:
+            return
+        self._submitting = True
+        try:
+            user, pwd = self.credentials()
+            who = authenticate(user, pwd)
+            if not who:
+                self.show_error("Invalid username or password, or account is inactive.")
+                self._submitting = False
+                return
+            # success: set process session once
+            set_current_user(who)
+            self._cache_now()
+            uid = int(getattr(who, "id", -1))
+            self._who = (getattr(who, "username", user), uid)
+            self.accept()
+        finally:
+            if self.isVisible():
+                self._submitting = False
 
     def _open_create_account(self) -> None:
         dlg = CreateAccountDialog(self)
