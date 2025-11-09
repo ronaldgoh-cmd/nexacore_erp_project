@@ -6,9 +6,9 @@ from PySide6.QtWidgets import (
     QMessageBox
 )
 from PySide6.QtGui import QAction, QPixmap
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt, Signal
 
-# Do NOT import LoginDialog here; only in do_logout() to avoid double prompt.
+# Do NOT import LoginDialog here; app.py shows it on startup and after logout.
 from ..ui.company_settings_dialog import CompanySettingsDialog
 from ..ui.user_settings_dialog import UserSettingsDialog
 from ..ui.about_dialog import AboutDialog
@@ -18,7 +18,7 @@ from ..core.plugins import discover_modules
 from ..core.permissions import has_permission, can_view
 from ..core import themes
 
-from ..core.auth import get_current_user, authenticate, set_current_user
+from ..core.auth import get_current_user  # login state comes from app.py
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -27,6 +27,9 @@ import re
 
 
 class MainWindow(QMainWindow):
+    # Emitted when user clicks Logout. app.py listens, closes this window, then shows LoginDialog.
+    logout_requested = Signal()
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("NexaCore ERP")
@@ -218,7 +221,6 @@ class MainWindow(QMainWindow):
             return
 
         if self._is_ephemeral():
-            # Superadministrator session without DB side effects
             self.user_settings = SimpleNamespace(timezone="Asia/Singapore", theme="light")
             self.account_btn.setText(self.user.username or "superadministrator")
             self.company_act_btn.setEnabled(True)
@@ -379,56 +381,11 @@ class MainWindow(QMainWindow):
                 self.user_settings = us
             self._apply_theme()
 
-    def do_logout(self):
-        """
-        Clear current user and re-login once, here.
-        This is the ONLY place in MainWindow that may show the login dialog,
-        and it occurs only after an explicit logout.
-        """
-        set_current_user(None)
-        self.user = None
-        self.user_settings = None
-        self.account_btn.setText("Not logged in")
-        self.company_act_btn.setEnabled(False)
-        self.modules_act_btn.setEnabled(False)
-        self._apply_theme()
-
-        try:
-            from ..ui.login_dialog import LoginDialog
-        except Exception:
-            return
-
-        dlg = LoginDialog(self)
-        if dlg.exec() != QDialog.Accepted:
-            return
-
-        try:
-            if hasattr(dlg, "credentials"):
-                username, password = dlg.credentials()
-            else:
-                username = dlg.ed_user.text().strip()
-                password = dlg.ed_pass.text()
-        except Exception:
-            username, password = "", ""
-
-        username = (username or "").strip()
-        password = password or ""
-        if not username:
-            QMessageBox.warning(self, "Login failed", "Username is required.")
-            return
-
-        u = authenticate(username, password)
-        if not u:
-            QMessageBox.warning(self, "Login failed", "Invalid username or password, or account is inactive.")
-            return
-
-        set_current_user(u)
-        self._bootstrap_user_from_auth_state()
-        self._rebuild_nav()
-        self._refresh_identity()
-
     def open_module_manager(self):
-        if not (self.user and (self.user.role == "superadmin" or has_permission(self.user.id, "modules.install"))):
+        """Install/enable modules and submodules."""
+        if not self.user:
+            return
+        if not (self.user.role == "superadmin" or has_permission(self.user.id, "modules.install")):
             return
 
         mods = discover_modules()
@@ -497,3 +454,11 @@ class MainWindow(QMainWindow):
         bb.accepted.connect(save)
         bb.rejected.connect(d.reject)
         d.exec()
+
+    def do_logout(self):
+        """
+        Do not show a login dialog here.
+        Close this window and let app.py show ONLY the login panel.
+        """
+        self.logout_requested.emit()
+        self.close()
