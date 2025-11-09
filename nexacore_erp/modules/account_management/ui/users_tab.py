@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget, QTableWidgetItem,
     QDialog, QFormLayout, QLineEdit, QComboBox, QDialogButtonBox, QMessageBox,
-    QAbstractItemView, QToolButton, QStyle, QCheckBox, QHeaderView
+    QAbstractItemView, QToolButton, QStyle, QCheckBox, QHeaderView, QLabel, QFrame
 )
 
 # Absolute imports into core
@@ -72,18 +72,24 @@ class _PasswordCell(QWidget):
         self._getter = get_plain_callable
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+
         self.ed = QLineEdit(self)
         self.ed.setReadOnly(True)
         self.ed.setEchoMode(QLineEdit.Password)
+        self.ed.setAlignment(Qt.AlignCenter)  # center text in field
         self.ed.setText(self._getter() or "")
+
         self.btn = QToolButton(self)
-        self._icon_eye = self.style().standardIcon(QStyle.SP_DialogYesButton)
-        self._icon_eye_off = self.style().standardIcon(QStyle.SP_DialogNoButton)
+        # Use a typical "eye" icon pairing from standard pixmaps
+        self._icon_eye = self.style().standardIcon(QStyle.SP_FileDialogDetailedView)
+        self._icon_eye_off = self.style().standardIcon(QStyle.SP_FileDialogListView)
         self.btn.setIcon(self._icon_eye)
-        self.btn.setToolTip("Show/Hide")
+        self.btn.setToolTip("Show/Hide password")
         self.btn.clicked.connect(self._toggle)
-        lay.addWidget(self.ed)
-        lay.addWidget(self.btn)
+
+        lay.addWidget(self.ed, 1, alignment=Qt.AlignCenter)
+        lay.addWidget(self.btn, 0, alignment=Qt.AlignCenter)
 
     def _toggle(self):
         if self.ed.echoMode() == QLineEdit.Password:
@@ -255,38 +261,51 @@ class UsersTab(QWidget):
             blob = getattr(u, "password_enc", None) or b""
             return _decrypt_for_view(blob)
 
+    def _center_checkbox_widget(self, chk: QCheckBox) -> QWidget:
+        w = QWidget()
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(chk, alignment=Qt.AlignCenter)
+        return w
+
+    def _center_item(self, r: int, c: int, text: str):
+        it = QTableWidgetItem(text)
+        it.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(r, c, it)
+
     # ---- core ----
     def reload(self):
         self.table.setRowCount(0)
         with SessionLocal() as s:
             rows = s.query(User).order_by(User.id.asc()).all()
             for u in rows:
-                # Hide the built-in break-glass account from UI
+                # Hide reserved break-glass account from UI
                 if (u.username or "").lower() == "superadministrator":
                     continue
 
                 r = self.table.rowCount()
                 self.table.insertRow(r)
-                self.table.setItem(r, 0, QTableWidgetItem(str(u.id)))
-                self.table.setItem(r, 1, QTableWidgetItem(u.username or ""))
-                self.table.setItem(r, 2, QTableWidgetItem(getattr(u, "email", "") or ""))
-                self.table.setItem(r, 3, QTableWidgetItem(u.role or "user"))
+
+                self._center_item(r, 0, str(u.id))
+                self._center_item(r, 1, u.username or "")
+                self._center_item(r, 2, getattr(u, "email", "") or "")
+                self._center_item(r, 3, u.role or "user")
 
                 active_cb = QCheckBox(); active_cb.setChecked(getattr(u, "is_active", True))
                 active_cb.stateChanged.connect(lambda _=None, uid=u.id, cb=active_cb: self._toggle_active(uid, cb.isChecked()))
-                self.table.setCellWidget(r, 4, active_cb)
+                self.table.setCellWidget(r, 4, self._center_checkbox_widget(active_cb))
 
                 verified_cb = QCheckBox(); verified_cb.setChecked(getattr(u, "is_verified", False))
                 verified_cb.stateChanged.connect(lambda _=None, uid=u.id, cb=verified_cb: self._toggle_verified(uid, cb.isChecked()))
-                self.table.setCellWidget(r, 5, verified_cb)
+                self.table.setCellWidget(r, 5, self._center_checkbox_widget(verified_cb))
 
                 cell = _PasswordCell(lambda uid=u.id: self._get_password_plain_for(uid))
                 self.table.setCellWidget(r, 6, cell)
 
                 created = getattr(u, "created_at", None)
-                self.table.setItem(
+                self._center_item(
                     r, 7,
-                    QTableWidgetItem(created.strftime("%Y-%m-%d %H:%M") if isinstance(created, datetime) else "")
+                    created.strftime("%Y-%m-%d %H:%M") if isinstance(created, datetime) else ""
                 )
 
     # ---- actions ----
