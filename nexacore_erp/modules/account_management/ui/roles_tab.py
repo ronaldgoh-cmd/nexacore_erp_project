@@ -4,30 +4,27 @@ from typing import Iterable, Tuple
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton, QLineEdit,
-    QGroupBox, QGridLayout, QCheckBox, QMessageBox, QListWidgetItem, QTreeWidget,
-    QTreeWidgetItem, QSplitter, QInputDialog
+    QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton,
+    QGroupBox, QGridLayout, QCheckBox, QMessageBox, QListWidgetItem,
+    QTreeWidget, QTreeWidgetItem, QSplitter, QInputDialog, QDialogButtonBox
 )
 
-# DB + models
 from nexacore_erp.core.database import SessionLocal
 from nexacore_erp.core.plugins import discover_modules
-from ..models import BaseAcc, Role, Permission, RolePermission, UserRole, AccessRule  # noqa: F401
+from ..models import Role, Permission, RolePermission, UserRole, AccessRule  # noqa: F401
 
-# Seed permissions. Add more as you add enforcement points.
 _BASE_PERMS = [
     "accounts.manage_users",
     "accounts.manage_roles",
     "modules.install",
 ]
 
-
 class RolesAccessTab(QWidget):
     def __init__(self):
         super().__init__()
         split = QSplitter(Qt.Horizontal, self)
 
-        # ---------- left: roles list + actions ----------
+        # left: roles list + actions
         left = QWidget()
         lv = QVBoxLayout(left)
         self.list_roles = QListWidget()
@@ -35,62 +32,49 @@ class RolesAccessTab(QWidget):
         self.btn_add = QPushButton("Add")
         self.btn_rename = QPushButton("Rename")
         self.btn_delete = QPushButton("Delete")
-        row.addWidget(self.btn_add)
-        row.addWidget(self.btn_rename)
-        row.addWidget(self.btn_delete)
-        lv.addWidget(self.list_roles)
-        lv.addLayout(row)
+        row.addWidget(self.btn_add); row.addWidget(self.btn_rename); row.addWidget(self.btn_delete)
+        lv.addWidget(self.list_roles); lv.addLayout(row)
 
-        # ---------- right: permissions + module access ----------
+        # right: permissions + module access + footer
         right = QWidget()
         rv = QVBoxLayout(right)
 
-        # permissions group
         grp_perm = QGroupBox("Permissions")
         self.perm_grid = QGridLayout(grp_perm)
         self.perm_checks: dict[str, QCheckBox] = {}
 
-        # save buttons row
-        actions_row = QHBoxLayout()
-        self.btn_save_perms = QPushButton("Save Permissions")
-        self.btn_save_access = QPushButton("Save Module Access")
-        actions_row.addStretch(1)
-        actions_row.addWidget(self.btn_save_perms)
-        actions_row.addWidget(self.btn_save_access)
-
-        # module access tree
-        grp_access = QGroupBox("Module Access")
+        grp_access = QGroupBox("Module & Sub-tab Access")
         self.tree = QTreeWidget()
+        self.tree.setColumnCount(2)
         self.tree.setHeaderLabels(["Module / Submodule", "View"])
         self.tree.setColumnWidth(0, 320)
-        lay_access = QVBoxLayout(grp_access)
-        lay_access.addWidget(self.tree)
+        lay_access = QVBoxLayout(grp_access); lay_access.addWidget(self.tree)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Reset)
+        self.btn_save = bb.button(QDialogButtonBox.Save)
+        self.btn_reset = bb.button(QDialogButtonBox.Reset)
 
         rv.addWidget(grp_perm)
         rv.addWidget(grp_access)
-        rv.addLayout(actions_row)
+        rv.addWidget(bb)
 
-        split.addWidget(left)
-        split.addWidget(right)
-        split.setStretchFactor(0, 0)
-        split.setStretchFactor(1, 1)
-        lay = QVBoxLayout(self)
-        lay.addWidget(split)
+        split.addWidget(left); split.addWidget(right)
+        split.setStretchFactor(0, 0); split.setStretchFactor(1, 1)
+        lay = QVBoxLayout(self); lay.addWidget(split)
 
-        # wire buttons
+        # wire
         self.btn_add.clicked.connect(self._add_role)
         self.btn_rename.clicked.connect(self._rename_role)
         self.btn_delete.clicked.connect(self._delete_role)
         self.list_roles.currentItemChanged.connect(lambda *_: self._load_role_detail())
-        self.btn_save_perms.clicked.connect(self._save_perms_clicked)
-        self.btn_save_access.clicked.connect(self._save_access_clicked)
+        self.btn_save.clicked.connect(self._save_all)
+        self.btn_reset.clicked.connect(self._load_role_detail)
 
-        # build static UI
         self._build_permissions_ui()
         self._reload_roles()
         self._reload_access_tree()
 
-    # ---------------- roles helpers ----------------
+    # roles
     def _selected_role(self) -> Role | None:
         it = self.list_roles.currentItem()
         return it.data(Qt.UserRole) if it else None
@@ -106,79 +90,6 @@ class RolesAccessTab(QWidget):
         if self.list_roles.count() > 0:
             self.list_roles.setCurrentRow(0)
 
-    # ---------------- permissions UI ----------------
-    def _discover_permission_keys(self) -> list[str]:
-        keys = list(_BASE_PERMS)
-        try:
-            for info, _ in discover_modules():
-                m = info.get("name", "")
-                if not m:
-                    continue
-                keys.append(f"module:{m}.view")
-                for sub in info.get("submodules", []):
-                    keys.append(f"module:{m}/{sub}.view")
-        except Exception:
-            pass
-        keys = sorted(set(keys))
-        return keys
-
-    def _build_permissions_ui(self):
-        # clear old
-        for i in reversed(range(self.perm_grid.count())):
-            w = self.perm_grid.itemAt(i).widget()
-            if w:
-                w.setParent(None)
-        self.perm_checks.clear()
-
-        keys = self._discover_permission_keys()
-        col = 0
-        rowi = 0
-        for i, k in enumerate(keys):
-            cb = QCheckBox(k)
-            self.perm_checks[k] = cb
-            self.perm_grid.addWidget(cb, rowi, col)
-            rowi += 1
-            if rowi > 12:
-                rowi = 0
-                col += 1
-
-    # ---------------- module access UI ----------------
-    def _reload_access_tree(self):
-        self.tree.clear()
-        role = self._selected_role()
-        role_id = role.id if role else None
-        rules_map: dict[tuple[str, str], bool] = {}
-        if role_id:
-            with SessionLocal() as s:
-                for ar in s.query(AccessRule).filter(AccessRule.role_id == role_id).all():
-                    rules_map[(ar.module_name, ar.submodule_name or "")] = bool(ar.can_view)
-
-        try:
-            modules: Iterable[Tuple[dict, object]] = discover_modules()
-        except Exception:
-            modules = []
-
-        for info, _ in modules:
-            mname = info.get("name", "")
-            if not mname:
-                continue
-            mitem = QTreeWidgetItem([mname, ""])
-            # make column 1 checkable
-            mitem.setFlags(mitem.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-            mitem.setData(0, Qt.UserRole, (mname, ""))
-            mitem.setCheckState(1, Qt.Checked if rules_map.get((mname, ""), False) else Qt.Unchecked)
-            self.tree.addTopLevelItem(mitem)
-
-            for sub in info.get("submodules", []):
-                subitem = QTreeWidgetItem([sub, ""])
-                subitem.setFlags(subitem.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-                subitem.setData(0, Qt.UserRole, (mname, sub))
-                subitem.setCheckState(1, Qt.Checked if rules_map.get((mname, sub), False) else Qt.Unchecked)
-                mitem.addChild(subitem)
-
-        self.tree.expandAll()
-
-    # ---------------- role CRUD ----------------
     def _add_role(self):
         name, ok = QInputDialog.getText(self, "Add Role", "Role name:")
         if not ok or not name.strip():
@@ -188,8 +99,7 @@ class RolesAccessTab(QWidget):
             if s.query(Role).filter(Role.name == name).first():
                 QMessageBox.warning(self, "Error", "Role already exists.")
                 return
-            s.add(Role(name=name))
-            s.commit()
+            s.add(Role(name=name)); s.commit()
         self._reload_roles()
 
     def _rename_role(self):
@@ -211,15 +121,86 @@ class RolesAccessTab(QWidget):
         r = self._selected_role()
         if not r:
             return
+        if QMessageBox.question(self, "Confirm", f"Delete role '{r.name}'?") != QMessageBox.Yes:
+            return
         with SessionLocal() as s:
             obj = s.query(Role).get(r.id)
             if not obj:
                 return
-            s.delete(obj)
-            s.commit()
+            s.query(RolePermission).filter(RolePermission.role_id == r.id).delete()
+            s.query(AccessRule).filter(AccessRule.role_id == r.id).delete()
+            s.query(UserRole).filter(UserRole.role_id == r.id).delete()
+            s.delete(obj); s.commit()
         self._reload_roles()
 
-    # ---------------- load role state ----------------
+    # permissions UI
+    def _discover_permission_keys(self) -> list[str]:
+        keys = list(_BASE_PERMS)
+        try:
+            for info, _ in discover_modules():
+                m = info.get("name", "")
+                if not m:
+                    continue
+                keys.append(f"module:{m}.view")
+                for sub in info.get("submodules", []):
+                    keys.append(f"module:{m}/{sub}.view")
+        except Exception:
+            pass
+        return sorted(set(keys))
+
+    def _build_permissions_ui(self):
+        # clear
+        for i in reversed(range(self.perm_grid.count())):
+            w = self.perm_grid.itemAt(i).widget()
+            if w:
+                w.setParent(None)
+        self.perm_checks.clear()
+
+        keys = self._discover_permission_keys()
+        col = 0; rowi = 0
+        for k in keys:
+            cb = QCheckBox(k)
+            self.perm_checks[k] = cb
+            self.perm_grid.addWidget(cb, rowi, col)
+            rowi += 1
+            if rowi > 12:
+                rowi = 0; col += 1
+
+    # module access tree
+    def _reload_access_tree(self):
+        self.tree.clear()
+        role = self._selected_role()
+        role_id = role.id if role else None
+        rules_map: dict[tuple[str, str], bool] = {}
+        if role_id:
+            with SessionLocal() as s:
+                for ar in s.query(AccessRule).filter(AccessRule.role_id == role_id).all():
+                    rules_map[(ar.module_name, ar.submodule_name or "")] = bool(ar.can_view)
+
+        try:
+            modules: Iterable[Tuple[dict, object]] = discover_modules()
+        except Exception:
+            modules = []
+
+        for info, _ in modules:
+            mname = info.get("name", "")
+            if not mname:
+                continue
+            mitem = QTreeWidgetItem([mname, ""])
+            mitem.setFlags(mitem.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            mitem.setData(0, Qt.UserRole, (mname, ""))
+            mitem.setCheckState(1, Qt.Checked if rules_map.get((mname, ""), False) else Qt.Unchecked)
+            self.tree.addTopLevelItem(mitem)
+
+            for sub in info.get("submodules", []):
+                subitem = QTreeWidgetItem([sub, ""])
+                subitem.setFlags(subitem.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+                subitem.setData(0, Qt.UserRole, (mname, sub))
+                subitem.setCheckState(1, Qt.Checked if rules_map.get((mname, sub), False) else Qt.Unchecked)
+                mitem.addChild(subitem)
+
+        self.tree.expandAll()
+
     def _load_role_detail(self):
         # reset checks
         for cb in self.perm_checks.values():
@@ -231,12 +212,18 @@ class RolesAccessTab(QWidget):
             return
 
         with SessionLocal() as s:
+            # role permissions -> keys
             rp = s.query(RolePermission).filter(RolePermission.role_id == r.id).all()
-            keys = {p.perm.key for p in rp}
-            for k, cb in self.perm_checks.items():
-                cb.setChecked(k in keys)
+            if rp:
+                # robust map id->key avoids relying on a relationship property
+                perm_ids = [x.perm_id for x in rp]
+                pkeys = {p.id: p.key for p in s.query(Permission).filter(Permission.id.in_(perm_ids)).all()}
+                for x in rp:
+                    key = pkeys.get(x.perm_id)
+                    if key and key in self.perm_checks:
+                        self.perm_checks[key].setChecked(True)
 
-    # ---------------- collect + save ----------------
+    # collect
     def _collect_perm_state(self) -> set[str]:
         return {k for k, cb in self.perm_checks.items() if cb.isChecked()}
 
@@ -255,57 +242,53 @@ class RolesAccessTab(QWidget):
             out.append((mname, sub or "", want))
         return out
 
-    def _save_perms_clicked(self):
+    # save all
+    def _save_all(self):
         r = self._selected_role()
         if not r:
             return
-        desired = self._collect_perm_state()
+
+        desired_perm = self._collect_perm_state()
+        desired_rules = self._collect_access_state()
 
         with SessionLocal() as s:
-            # ensure Permission rows exist
+            # ensure permissions
             perm_map = {p.key: p for p in s.query(Permission).all()}
-            for k in desired:
+            for k in desired_perm:
                 if k not in perm_map:
-                    p = Permission(key=k)
-                    s.add(p)
-                    s.flush()
-                    perm_map[k] = p
+                    p = Permission(key=k); s.add(p); s.flush(); perm_map[k] = p
 
-            # current links
+            # current role-permission links
             cur_links = s.query(RolePermission).filter(RolePermission.role_id == r.id).all()
-            cur_keys = {lnk.perm.key for lnk in cur_links}
+            id2key = {p.id: p.key for p in s.query(Permission).all()}
+            cur_keys = {id2key.get(lnk.perm_id) for lnk in cur_links}
+            cur_keys.discard(None)
 
-            # add
-            for addk in desired - cur_keys:
-                s.add(RolePermission(role_id=r.id, perm_id=perm_map[addk].id))
-            # remove
+            # add missing
+            for k in desired_perm - cur_keys:
+                s.add(RolePermission(role_id=r.id, perm_id=perm_map[k].id))
+            # remove extra
             for lnk in cur_links:
-                if lnk.perm.key not in desired:
+                k = id2key.get(lnk.perm_id)
+                if k and k not in desired_perm:
                     s.delete(lnk)
 
+            # access rules
+            cur_rules = {(ar.module_name, ar.submodule_name or ""): ar
+                         for ar in s.query(AccessRule).filter(AccessRule.role_id == r.id).all()}
+            # set desired
+            want_set = {(m, sname) for (m, sname, want) in desired_rules if want}
+            for key in want_set:
+                if key in cur_rules:
+                    cur_rules[key].can_view = True
+                else:
+                    m, sub = key
+                    s.add(AccessRule(role_id=r.id, module_name=m, submodule_name=sub, can_view=True))
+            # remove undesired
+            for key, ar in list(cur_rules.items()):
+                if key not in want_set:
+                    s.delete(ar)
+
             s.commit()
 
-        QMessageBox.information(self, "Saved", "Permissions saved.")
-
-    def _save_access_clicked(self):
-        r = self._selected_role()
-        if not r:
-            return
-        states = self._collect_access_state()
-
-        with SessionLocal() as s:
-            for mname, sub, want in states:
-                rule = s.query(AccessRule).filter(
-                    AccessRule.role_id == r.id,
-                    AccessRule.module_name == mname,
-                    AccessRule.submodule_name == (sub or "")
-                ).first()
-                if want and not rule:
-                    s.add(AccessRule(role_id=r.id, module_name=mname, submodule_name=(sub or ""), can_view=True))
-                elif want and rule:
-                    rule.can_view = True
-                elif not want and rule:
-                    s.delete(rule)
-            s.commit()
-
-        QMessageBox.information(self, "Saved", "Module access saved.")
+        QMessageBox.information(self, "Saved", "Permissions and access saved.")

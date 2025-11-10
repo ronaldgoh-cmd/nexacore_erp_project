@@ -1,4 +1,4 @@
-# High-contrast NAV/SAP-like themes with explicit backgrounds.
+# High-contrast NAV/SAP-like themes with explicit backgrounds and visible indicators.
 
 LIGHT = """
 /* Base */
@@ -44,6 +44,20 @@ QTableView, QListView, QTreeView { background: #ffffff; color: #18202a; border: 
 QHeaderView::section { background: #eef2f6; color: #18202a; border: 1px solid #d6dbe3; padding: 4px 6px; font-weight: 600; }
 QTableView::item:selected, QListView::item:selected, QTreeView::item:selected { background: #e7f0fe; color: #0a6ed1; }
 
+/* Item-view checkbox indicators (tree/table check states) */
+QTreeView::indicator, QTreeWidget::indicator, QTableView::indicator {
+  width: 18px; height: 18px; margin-left: 6px; margin-right: 6px;
+}
+QTreeView::indicator:unchecked, QTreeWidget::indicator:unchecked, QTableView::indicator:unchecked {
+  border: 1px solid #586170; background: #ffffff; border-radius: 3px;
+}
+QTreeView::indicator:checked, QTreeWidget::indicator:checked, QTableView::indicator:checked {
+  border: 1px solid #0a6ed1; background: #0a6ed1; border-radius: 3px;
+}
+QTreeView::indicator:indeterminate, QTreeWidget::indicator:indeterminate, QTableView::indicator:indeterminate {
+  border: 1px solid #0a6ed1; background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #e7f0fe, stop:1 #bcd7ff); border-radius: 3px;
+}
+
 /* Menus */
 QMenu { background: #ffffff; color: #18202a; border: 1px solid #d6dbe3; }
 QMenu::item:selected { background: #e7f0fe; color: #0a6ed1; }
@@ -51,18 +65,12 @@ QMenu::item:selected { background: #e7f0fe; color: #0a6ed1; }
 /* Status bar */
 QStatusBar { background: #ffffff; color: #2a3b4f; border-top: 1px solid #d6dbe3; }
 
-/* Explicit checkbox and radio indicators for consistency */
+/* Standalone checkbox and radio indicators */
 QCheckBox, QRadioButton { color: #18202a; }
 QCheckBox::indicator, QRadioButton::indicator { width: 18px; height: 18px; }
-QCheckBox::indicator:unchecked, QRadioButton::indicator:unchecked {
-  border: 1px solid #888; background: transparent;
-}
-QCheckBox::indicator:checked, QRadioButton::indicator:checked {
-  border: 1px solid #0a6ed1; background: #0a6ed1;
-}
-QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
-  border: 1px solid #c8ced6; background: #eef2f6;
-}
+QCheckBox::indicator:unchecked, QRadioButton::indicator:unchecked { border: 1px solid #586170; background: #ffffff; border-radius: 3px; }
+QCheckBox::indicator:checked, QRadioButton::indicator:checked { border: 1px solid #0a6ed1; background: #0a6ed1; border-radius: 3px; }
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled { border: 1px solid #c8ced6; background: #eef2f6; }
 """
 
 DARK = """
@@ -109,6 +117,20 @@ QTableView, QListView, QTreeView { background: #0f1216; color: #e6edf3; border: 
 QHeaderView::section { background: #151c2a; color: #e6edf3; border: 1px solid #2a3446; padding: 4px 6px; font-weight: 600; }
 QTableView::item:selected, QListView::item:selected, QTreeView::item:selected { background: #243551; color: #9fc2ff; }
 
+/* Item-view checkbox indicators (tree/table check states) */
+QTreeView::indicator, QTreeWidget::indicator, QTableView::indicator {
+  width: 18px; height: 18px; margin-left: 6px; margin-right: 6px;
+}
+QTreeView::indicator:unchecked, QTreeWidget::indicator:unchecked, QTableView::indicator:unchecked {
+  border: 1px solid #8a8f98; background: #0f1216; border-radius: 3px;
+}
+QTreeView::indicator:checked, QTreeWidget::indicator:checked, QTableView::indicator:checked {
+  border: 1px solid #2f8bff; background: #2f8bff; border-radius: 3px;
+}
+QTreeView::indicator:indeterminate, QTreeWidget::indicator:indeterminate, QTableView::indicator:indeterminate {
+  border: 1px solid #2f8bff; background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #243551, stop:1 #3a5d8a); border-radius: 3px;
+}
+
 /* Menus */
 QMenu { background: #0f1216; color: #e6edf3; border: 1px solid #2a3446; }
 QMenu::item:selected { background: #243551; color: #9fc2ff; }
@@ -116,16 +138,10 @@ QMenu::item:selected { background: #243551; color: #9fc2ff; }
 /* Status bar */
 QStatusBar { background: #101521; color: #cdd7e5; border-top: 1px solid #2a3446; }
 
-/* Explicit checkbox and radio indicators for consistency */
+/* Standalone checkbox and radio indicators */
 QCheckBox, QRadioButton { color: #e6edf3; }
 QCheckBox::indicator, QRadioButton::indicator { width: 18px; height: 18px; }
-QCheckBox::indicator:unchecked, QRadioButton::indicator:unchecked {
-  border: 1px solid #888; background: #2b2f3a;
-}
-QCheckBox::indicator:checked, QRadioButton::indicator:checked {
-  border: 1px solid #4a90e2; background: #4a90e2;
-}
-QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
-  border: 1px solid #2a3446; background: #151c2a;
-}
+QCheckBox::indicator:unchecked, QRadioButton::indicator:unchecked { border: 1px solid #8a8f98; background: #1e1f22; border-radius: 3px; }
+QCheckBox::indicator:checked, QRadioButton::indicator:checked { border: 1px solid #2f8bff; background: #2f8bff; border-radius: 3px; }
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled { border: 1px solid #2a3446; background: #151c2a; }
 """

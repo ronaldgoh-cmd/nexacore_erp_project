@@ -8,24 +8,21 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget, QTableWidgetItem,
     QDialog, QFormLayout, QLineEdit, QComboBox, QDialogButtonBox, QMessageBox,
-    QAbstractItemView, QToolButton, QStyle, QCheckBox, QHeaderView, QLabel, QFrame
+    QAbstractItemView, QToolButton, QStyle, QCheckBox, QHeaderView
 )
 
-# Absolute imports into core
 from nexacore_erp.core.database import SessionLocal
 from nexacore_erp.core.models import User
+from nexacore_erp.modules.account_management.models import Role, UserRole
 
 try:
     from nexacore_erp.core.auth import hash_password as _hash
 except Exception:
     _hash = None
 
-# ---------- optional encryption for reveal ----------
-def _key_dir() -> Path:
-    return Path.home() / ".nexacore_erp"
-def _key_path() -> Path:
-    return _key_dir() / "secret.key"
-
+# ---- reveal helpers
+def _key_dir() -> Path: return Path.home() / ".nexacore_erp"
+def _key_path() -> Path: return _key_dir() / "secret.key"
 def _load_or_create_key() -> Optional[bytes]:
     try:
         from cryptography.fernet import Fernet  # noqa
@@ -36,23 +33,16 @@ def _load_or_create_key() -> Optional[bytes]:
     if p.exists():
         return p.read_bytes()
     from cryptography.fernet import Fernet  # type: ignore
-    k = Fernet.generate_key()
-    p.write_bytes(k)
-    return k
-
+    k = Fernet.generate_key(); p.write_bytes(k); return k
 _ENC_KEY = _load_or_create_key()
-
 def _encrypt_for_view(plain: str) -> bytes:
-    if not plain:
-        return b""
+    if not plain: return b""
     if _ENC_KEY:
         from cryptography.fernet import Fernet  # type: ignore
         return Fernet(_ENC_KEY).encrypt(plain.encode("utf-8"))
     return base64.b64encode(plain.encode("utf-8"))
-
 def _decrypt_for_view(blob: bytes | str) -> str:
-    if not blob:
-        return ""
+    if not blob: return ""
     data = blob if isinstance(blob, (bytes, bytearray)) else blob.encode("utf-8")
     if _ENC_KEY:
         try:
@@ -65,42 +55,33 @@ def _decrypt_for_view(blob: bytes | str) -> str:
     except Exception:
         return ""
 
-# ---------- small widgets ----------
+# ---- roles helper (load from DB)
+def _fetch_role_names() -> list[str]:
+    try:
+        with SessionLocal() as s:
+            names = [r.name for r in s.query(Role).order_by(Role.name.asc()).all() if r.name]
+        return names or ["user"]
+    except Exception:
+        return ["user"]
+
 class _PasswordCell(QWidget):
-    def __init__(self, get_plain_callable):
+    def __init__(self, getter):
         super().__init__()
-        self._getter = get_plain_callable
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(4)
-
-        self.ed = QLineEdit(self)
-        self.ed.setReadOnly(True)
-        self.ed.setEchoMode(QLineEdit.Password)
-        self.ed.setAlignment(Qt.AlignCenter)  # center text in field
+        self._getter = getter
+        lay = QHBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(4)
+        self.ed = QLineEdit(self); self.ed.setReadOnly(True); self.ed.setEchoMode(QLineEdit.Password); self.ed.setAlignment(Qt.AlignCenter)
         self.ed.setText(self._getter() or "")
-
         self.btn = QToolButton(self)
-        # Use a typical "eye" icon pairing from standard pixmaps
         self._icon_eye = self.style().standardIcon(QStyle.SP_FileDialogDetailedView)
         self._icon_eye_off = self.style().standardIcon(QStyle.SP_FileDialogListView)
-        self.btn.setIcon(self._icon_eye)
-        self.btn.setToolTip("Show/Hide password")
-        self.btn.clicked.connect(self._toggle)
-
-        lay.addWidget(self.ed, 1, alignment=Qt.AlignCenter)
-        lay.addWidget(self.btn, 0, alignment=Qt.AlignCenter)
-
+        self.btn.setIcon(self._icon_eye); self.btn.setToolTip("Show/Hide password"); self.btn.clicked.connect(self._toggle)
+        lay.addWidget(self.ed, 1, alignment=Qt.AlignCenter); lay.addWidget(self.btn, 0, alignment=Qt.AlignCenter)
     def _toggle(self):
         if self.ed.echoMode() == QLineEdit.Password:
-            self.ed.setText(self._getter() or "")
-            self.ed.setEchoMode(QLineEdit.Normal)
-            self.btn.setIcon(self._icon_eye_off)
+            self.ed.setText(self._getter() or ""); self.ed.setEchoMode(QLineEdit.Normal); self.btn.setIcon(self._icon_eye_off)
         else:
-            self.ed.setEchoMode(QLineEdit.Password)
-            self.btn.setIcon(self._icon_eye)
+            self.ed.setEchoMode(QLineEdit.Password); self.btn.setIcon(self._icon_eye)
 
-# ---------- dialogs ----------
 class _UserDialog(QDialog):
     """Create or edit user metadata. Edit mode does not touch password."""
     def __init__(self, parent=None, user: User | None = None):
@@ -112,16 +93,27 @@ class _UserDialog(QDialog):
 
         self.ed_username = QLineEdit()
         self.ed_email = QLineEdit()
-        self.cb_role = QComboBox(); self.cb_role.addItems(["user", "admin", "superadmin"])
+
+        # Roles come from DB
+        self.cb_role = QComboBox()
+        role_names = _fetch_role_names()
+        self.cb_role.addItems(role_names)
+
         self.cb_active = QCheckBox("Active")
         self.cb_verified = QCheckBox("Verified")
 
         if user:
             self.ed_username.setText(user.username or "")
             self.ed_email.setText(getattr(user, "email", "") or "")
-            idx = self.cb_role.findText(user.role or "user")
-            if idx >= 0:
-                self.cb_role.setCurrentIndex(idx)
+
+            current_role = (user.role or "").strip() or (role_names[0] if role_names else "")
+            if current_role and self.cb_role.findText(current_role) >= 0:
+                self.cb_role.setCurrentIndex(self.cb_role.findText(current_role))
+            elif current_role:
+                # ensure visibility if role was removed from DB
+                self.cb_role.insertItem(0, current_role)
+                self.cb_role.setCurrentIndex(0)
+
             self.cb_active.setChecked(getattr(user, "is_active", True))
             self.cb_verified.setChecked(getattr(user, "is_verified", False))
         else:
@@ -149,7 +141,7 @@ class _UserDialog(QDialog):
         out = {
             "username": self.ed_username.text().strip(),
             "email": self.ed_email.text().strip(),
-            "role": self.cb_role.currentText(),
+            "role": self.cb_role.currentText().strip(),
             "is_active": self.cb_active.isChecked(),
             "is_verified": self.cb_verified.isChecked(),
         }
@@ -172,7 +164,6 @@ class _ResetPasswordDialog(QDialog):
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self._check); bb.rejected.connect(self.reject)
         lay.addWidget(bb)
-
     def _check(self):
         a, b = self.p1.text(), self.p2.text()
         if not a:
@@ -180,11 +171,10 @@ class _ResetPasswordDialog(QDialog):
         if a != b:
             QMessageBox.warning(self, "Error", "Passwords do not match."); return
         self.accept()
-
     def value(self) -> str:
         return self.p1.text()
 
-# ---------- migrations ----------
+# migrations
 def _ensure_user_columns():
     with SessionLocal() as s:
         raw = s.connection().connection
@@ -203,7 +193,18 @@ def _ensure_user_columns():
         _add("password_enc", "password_enc BLOB")
         raw.commit()
 
-# ---------- main widget ----------
+def _sync_user_role_map(s, u: User):
+    """Mirror users.role into the user_roles junction for permission checks."""
+    name = (u.role or "").strip()
+    s.query(UserRole).filter(UserRole.user_id == u.id).delete()
+    if not name:
+        return
+    r = s.query(Role).filter(Role.name == name).first()
+    if not r:
+        r = Role(name=name); s.add(r); s.flush()
+    s.add(UserRole(user_id=u.id, role_id=r.id))
+
+# main widget
 class UsersTab(QWidget):
     def __init__(self):
         super().__init__()
@@ -223,7 +224,6 @@ class UsersTab(QWidget):
         actions.addStretch(1)
         v.addLayout(actions)
 
-        # ID | Username | Email | Role | Active | Verified | Password | Created
         self.table = QTableWidget(0, 8, self)
         self.table.setHorizontalHeaderLabels(
             ["ID", "Username", "Email", "Role", "Active", "Verified", "Password", "Created"]
@@ -245,7 +245,7 @@ class UsersTab(QWidget):
 
         self.reload()
 
-    # ---- utils ----
+    # utils
     def _selected_user_id(self) -> int | None:
         r = self.table.currentRow()
         if r < 0:
@@ -273,16 +273,14 @@ class UsersTab(QWidget):
         it.setTextAlignment(Qt.AlignCenter)
         self.table.setItem(r, c, it)
 
-    # ---- core ----
+    # core
     def reload(self):
         self.table.setRowCount(0)
         with SessionLocal() as s:
             rows = s.query(User).order_by(User.id.asc()).all()
             for u in rows:
-                # Hide reserved break-glass account from UI
                 if (u.username or "").lower() == "superadministrator":
                     continue
-
                 r = self.table.rowCount()
                 self.table.insertRow(r)
 
@@ -308,7 +306,7 @@ class UsersTab(QWidget):
                     created.strftime("%Y-%m-%d %H:%M") if isinstance(created, datetime) else ""
                 )
 
-    # ---- actions ----
+    # actions
     def _add(self):
         dlg = _UserDialog(self, None)
         if dlg.exec() != QDialog.Accepted:
@@ -333,7 +331,8 @@ class UsersTab(QWidget):
             phash = _hash(vals["password"]) if _hash else vals["password"]
             setattr(u, "password_hash", phash)
             setattr(u, "password_enc", _encrypt_for_view(vals["password"]))
-            s.add(u); s.commit()
+            s.add(u); s.commit(); s.refresh(u)
+            _sync_user_role_map(s, u); s.commit()
         self.reload()
 
     def _edit(self):
@@ -344,7 +343,7 @@ class UsersTab(QWidget):
             u = s.query(User).get(uid)
             if not u:
                 return
-            dlg = _UserDialog(self, u)  # no password fields in edit
+            dlg = _UserDialog(self, u)  # edit does not change password
             if dlg.exec() != QDialog.Accepted:
                 return
             vals = dlg.values()
@@ -358,6 +357,7 @@ class UsersTab(QWidget):
             setattr(u, "is_active", vals["is_active"])
             setattr(u, "is_verified", vals["is_verified"])
             s.commit()
+            _sync_user_role_map(s, u); s.commit()
         self.reload()
 
     def _reset(self):
@@ -402,6 +402,7 @@ class UsersTab(QWidget):
             u = s.query(User).get(uid)
             if not u:
                 return
+            s.query(UserRole).filter(UserRole.user_id == u.id).delete()
             s.delete(u); s.commit()
         self.reload()
 
