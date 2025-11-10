@@ -5,6 +5,27 @@
     "Leave Management",
     "Salary Management"
   ],
+  "tab_manifest": {
+    "__module__": [
+      "Employee List",
+      "Holidays",
+      "Employee Settings"
+    ],
+    "Leave Management": [
+      "Summary",
+      "Application",
+      "All Details",
+      "Adjustments",
+      "Calendar",
+      "User Application History"
+    ],
+    "Salary Management": [
+      "Summary",
+      "Salary Review",
+      "Salary Vouchers",
+      "Settings"
+    ]
+  },
   "requires": [
     "core>=0.1.0"
   ],

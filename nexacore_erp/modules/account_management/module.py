@@ -26,6 +26,35 @@ def _ensure_core_user_columns():
 def _ensure_acc_tables():
     # create account-management tables in MAIN DB only
     BaseAcc.metadata.create_all(bind=MAIN_ENGINE)
+    # upgrade am_access_rules with tab_name + new unique constraint if needed
+    with MAIN_ENGINE.begin() as conn:
+        conn.execute(text("PRAGMA foreign_keys = OFF"))
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info('am_access_rules')")).fetchall()}
+        if "tab_name" not in cols:
+            conn.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS am_access_rules__new (
+                    id INTEGER PRIMARY KEY,
+                    role_id INTEGER NOT NULL REFERENCES am_roles(id) ON DELETE CASCADE,
+                    module_name VARCHAR,
+                    submodule_name VARCHAR DEFAULT '',
+                    tab_name VARCHAR DEFAULT '',
+                    can_view BOOLEAN DEFAULT 1,
+                    can_edit BOOLEAN DEFAULT 0,
+                    UNIQUE(role_id, module_name, submodule_name, tab_name)
+                );
+                """
+            ))
+            conn.execute(text(
+                """
+                INSERT INTO am_access_rules__new (id, role_id, module_name, submodule_name, tab_name, can_view, can_edit)
+                SELECT id, role_id, module_name, submodule_name, '' AS tab_name, can_view, can_edit
+                FROM am_access_rules;
+                """
+            ))
+            conn.execute(text("DROP TABLE am_access_rules"))
+            conn.execute(text("ALTER TABLE am_access_rules__new RENAME TO am_access_rules"))
+        conn.execute(text("PRAGMA foreign_keys = ON"))
     # seed a default "Admin" role with baseline powers if empty
     with SessionLocal() as s:
         if not s.query(Role).first():

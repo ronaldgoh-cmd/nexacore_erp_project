@@ -248,7 +248,6 @@ class EmployeeMainWidget(QWidget):
             if self.tabs.tabText(i) not in allowed_labels:
                 self.tabs.removeTab(i)
 
-
     def _allowed(self, sub_label: str) -> bool:
         try:
             u = get_current_user()
@@ -256,7 +255,7 @@ class EmployeeMainWidget(QWidget):
                 return True  # avoid dead UI if unauthenticated context
             if getattr(u, "role", "") == "superadmin" or getattr(u, "id", -1) < 0:
                 return True
-            return can_view(u.id, "Employee Management", sub_label)
+            return can_view(u.id, "Employee Management", None, sub_label)
         except Exception:
             return True  # fail-open to avoid breaking UI
 

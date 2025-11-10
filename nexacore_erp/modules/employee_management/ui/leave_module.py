@@ -40,6 +40,7 @@ def filter_tabs_by_access(self, allowed_keys: list[str] | set[str]):
 
 # =================== ACL helpers and module meta ===================
 
+ROOT_MODULE_NAME = "Employee Management"
 MODULE_NAME = "Leave Management"
 SUBMODULES = ["Summary", "Application", "All Details", "Adjustments", "Calendar", "User Application History"]
 
@@ -56,16 +57,20 @@ except Exception:
 try:
     from ....core.permissions import can_view  # type: ignore
 except Exception:
-    def can_view(_user_id, _module, _submodule) -> bool:
+    def can_view(_user_id, _module, _submodule=None, _tab=None) -> bool:
         return True
 
-def _gate_subtabs(root: QWidget, module_name: str, submodules: List[str]) -> None:
+def _gate_subtabs(root: QWidget, module_name: str, submodule_name: str | None, submodules: List[str]) -> None:
     """Hide tabs that current user cannot view. Safe no-op on failure."""
     try:
         u = get_current_user()
         if not u or getattr(u, "role", "") == "superadmin":
             return
-        allowed = {s for s in submodules if can_view(getattr(u, "id", None), module_name, s)}
+        allowed = {
+            s
+            for s in submodules
+            if can_view(getattr(u, "id", None), module_name, submodule_name, s)
+        }
         for tw in root.findChildren(QTabWidget):
             titles = [tw.tabText(i) for i in range(tw.count())]
             if not any(t in submodules for t in titles):
@@ -546,7 +551,7 @@ class LeaveModuleWidget(QWidget):
         self.tabs.addTab(self._user_history_tab, "User Application History")
 
         # Gate sub-tabs based on permissions. Safe no-op if permissions not wired.
-        _gate_subtabs(self, MODULE_NAME, SUBMODULES)
+        _gate_subtabs(self, ROOT_MODULE_NAME, MODULE_NAME, SUBMODULES)
 
     MODULE_KEY = "leave_management"
 
@@ -1575,7 +1580,7 @@ def get_widget() -> QWidget:
     """Return the Leave module root widget with tabs already gated."""
     w = LeaveModuleWidget()
     # gating already applied in __init__, but call again safely if needed
-    _gate_subtabs(w, MODULE_NAME, SUBMODULES)
+    _gate_subtabs(w, ROOT_MODULE_NAME, MODULE_NAME, SUBMODULES)
     return w
 
 def get_submodule_widget(sub: str) -> QWidget:

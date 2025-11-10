@@ -25,6 +25,27 @@ class Module:
             "submodules": ["Leave Management", "Salary Management"],
             "version": "0.1.0",
             "author": "NexaCore Digital Solutions",
+            "tab_manifest": {
+                "__module__": [
+                    "Employee List",
+                    "Holidays",
+                    "Employee Settings",
+                ],
+                "Leave Management": [
+                    "Summary",
+                    "Application",
+                    "All Details",
+                    "Adjustments",
+                    "Calendar",
+                    "User Application History",
+                ],
+                "Salary Management": [
+                    "Summary",
+                    "Salary Review",
+                    "Salary Vouchers",
+                    "Settings",
+                ],
+            },
         }
 
     def get_info(self) -> dict:

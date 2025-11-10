@@ -39,19 +39,30 @@ def has_permission(user_id: int, perm_key: str) -> bool:
         )
         return s.query(q.exists()).scalar()
 
-def can_view(user_id: int, module_name: str, submodule_name: str | None = None) -> bool:
+def can_view(
+    user_id: int,
+    module_name: str,
+    submodule_name: str | None = None,
+    tab_name: str | None = None,
+) -> bool:
     """
     Grants view if:
-      1) Role has perm 'module:{module}.view' (module level), or
-         'module:{module}/{sub}.view' (submodule), OR
-      2) An AccessRule exists for the role on that module/sub with can_view=1.
+      1) Role has perm 'module:{module}.view' (module level),
+         'module:{module}/{sub}.view' (submodule), or
+         'module:{module}/{sub}/{tab}.view' (tab), OR
+      2) An AccessRule exists for the role on that module/sub/tab with can_view=1.
 
     Names are normalized to avoid whitespace/case mismatches.
     """
     mkey = _norm(module_name)
     skey = _norm(submodule_name or "")
+    tkey = _norm(tab_name or "")
 
     # Permission keys fallback path
+    if tkey:
+        perm_sub = skey or "__module__"
+        if has_permission(user_id, f"module:{mkey}/{perm_sub}/{tkey}.view"):
+            return True
     if skey:
         if has_permission(user_id, f"module:{mkey}/{skey}.view"):
             return True
@@ -65,13 +76,23 @@ def can_view(user_id: int, module_name: str, submodule_name: str | None = None) 
             return False
 
         # Compare case-insensitively with trimming
-        q = (
-            s.query(AccessRule)
-            .filter(
-                AccessRule.role_id.in_(rids),
-                func.lower(func.trim(AccessRule.module_name)) == mkey,
-                func.lower(func.trim(AccessRule.submodule_name)) == skey,
-                AccessRule.can_view == True,  # noqa: E712
+        def _exists(match_sub: str, match_tab: str) -> bool:
+            q = (
+                s.query(AccessRule)
+                .filter(
+                    AccessRule.role_id.in_(rids),
+                    func.lower(func.trim(AccessRule.module_name)) == mkey,
+                    func.lower(func.trim(AccessRule.submodule_name)) == match_sub,
+                    func.lower(func.trim(AccessRule.tab_name)) == match_tab,
+                    AccessRule.can_view == True,  # noqa: E712
+                )
             )
-        )
-        return s.query(q.exists()).scalar()
+            return s.query(q.exists()).scalar()
+
+        if _exists(skey, tkey):
+            return True
+        if tkey and _exists(skey, ""):
+            return True
+        if _exists("", ""):
+            return True
+        return False

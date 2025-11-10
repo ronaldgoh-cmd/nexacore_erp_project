@@ -5,12 +5,17 @@ from PySide6.QtWidgets import QTabWidget, QLabel
 from nexacore_erp.core.auth import get_current_user
 from nexacore_erp.core.permissions import can_view
 
-def apply_tab_access(tabs: QTabWidget, module_name: str, submap: Optional[Dict[str, str]] = None) -> None:
+def apply_tab_access(
+    tabs: QTabWidget,
+    module_name: str,
+    submodule_name: str | None = None,
+    tab_map: Optional[Dict[str, str]] = None,
+) -> None:
     """
     Hide tabs the current user cannot view.
     - module_name must equal discover_modules()[i]["name"] for this module.
-    - submap maps visible tab text -> submodule key stored in AccessRule.
-      If None, the visible tab text is used as the submodule key.
+    - submodule_name optionally narrows the AccessRule lookups to a submodule.
+    - tab_map maps visible tab text -> stored tab key (defaults to the label itself).
     """
     user = get_current_user()
     # superadmin always sees everything
@@ -20,8 +25,8 @@ def apply_tab_access(tabs: QTabWidget, module_name: str, submap: Optional[Dict[s
     # remove disallowed tabs (iterate backwards)
     for i in range(tabs.count() - 1, -1, -1):
         label = tabs.tabText(i)
-        key = (submap or {}).get(label, label)
-        if not can_view(user.id, module_name, key):
+        key = (tab_map or {}).get(label, label)
+        if not can_view(user.id, module_name, submodule_name, key):
             tabs.removeTab(i)
 
     # if nothing left, show a friendly message

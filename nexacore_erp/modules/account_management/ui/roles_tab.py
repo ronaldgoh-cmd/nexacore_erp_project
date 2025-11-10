@@ -24,11 +24,58 @@ def _norm(s: str) -> str:
     s = (s or "").strip().lower()
     return re.sub(r"\s+", " ", s)
 
-def _perm_key(module_name: str, submodule_name: str | None = None) -> str:
+def _perm_key(module_name: str, submodule_name: str | None = None, tab_name: str | None = None) -> str:
     m = _norm(module_name)
-    if submodule_name:
-        return f"module:{m}/{_norm(submodule_name)}.view"
+    s = _norm(submodule_name or "")
+    t = _norm(tab_name or "")
+    if t:
+        sub_part = s or "__module__"
+        return f"module:{m}/{sub_part}/{t}.view"
+    if s:
+        return f"module:{m}/{s}.view"
     return f"module:{m}.view"
+
+def _manifest_submodules(info: dict) -> list[str]:
+    out: list[str] = []
+    for entry in info.get("submodules", []) or []:
+        name = ""
+        if isinstance(entry, str):
+            name = entry
+        elif isinstance(entry, dict):
+            name = entry.get("name") or entry.get("label") or entry.get("title") or ""
+        if isinstance(name, str):
+            name = name.strip()
+        else:
+            name = str(name).strip()
+        if name:
+            out.append(name)
+    return out
+
+
+def _manifest_tab_map(info: dict) -> dict[str, list[str]]:
+    raw = info.get("tab_manifest") or {}
+    out: dict[str, list[str]] = {}
+    if not isinstance(raw, dict):
+        return out
+    for key, tabs in raw.items():
+        if isinstance(key, str):
+            skey = key.strip()
+        else:
+            skey = str(key).strip()
+        if not skey:
+            continue
+        if isinstance(tabs, (list, tuple)):
+            cleaned = []
+            for tab in tabs:
+                if isinstance(tab, str):
+                    t = tab.strip()
+                else:
+                    t = str(tab).strip()
+                if t:
+                    cleaned.append(t)
+            if cleaned:
+                out[skey] = cleaned
+    return out
 
 
 class RolesAccessTab(QWidget):
@@ -55,10 +102,10 @@ class RolesAccessTab(QWidget):
         self.perm_grid = QGridLayout(grp_perm)
         self.perm_checks: dict[str, QCheckBox] = {}
 
-        grp_access = QGroupBox("Module & Submodule Access")
+        grp_access = QGroupBox("Module, Submodule & Tab Access")
         self.tree = QTreeWidget()
         self.tree.setColumnCount(2)
-        self.tree.setHeaderLabels(["Module / Submodule", "View"])
+        self.tree.setHeaderLabels(["Module / Submodule / Tab", "View"])
         self.tree.setColumnWidth(0, 320)
         self.tree.setColumnWidth(1, 80)
         self.tree.setAllColumnsShowFocus(True)
@@ -156,9 +203,14 @@ class RolesAccessTab(QWidget):
                 m = info.get("name", "")
                 if not m:
                     continue
-                keys.append(_perm_key(m))  # normalized
-                for sub in info.get("submodules", []):
-                    keys.append(_perm_key(m, sub))  # normalized
+                keys.append(_perm_key(m))  # normalized module-level view
+                tab_map = _manifest_tab_map(info)
+                for tab in tab_map.get("__module__", []):
+                    keys.append(_perm_key(m, None, tab))
+                for sub in _manifest_submodules(info):
+                    keys.append(_perm_key(m, sub))
+                    for tab in tab_map.get(sub, []):
+                        keys.append(_perm_key(m, sub, tab))
         except Exception:
             pass
         # Keep only unique
@@ -190,11 +242,16 @@ class RolesAccessTab(QWidget):
             self.tree.clear()
             role = self._selected_role()
             role_id = role.id if role else None
-            rules_map: dict[tuple[str, str], bool] = {}
+            rules_map: dict[tuple[str, str, str], bool] = {}
             if role_id:
                 with SessionLocal() as s:
                     for ar in s.query(AccessRule).filter(AccessRule.role_id == role_id).all():
-                        rules_map[(ar.module_name.strip(), (ar.submodule_name or "").strip())] = bool(ar.can_view)
+                        key = (
+                            (ar.module_name or "").strip(),
+                            (ar.submodule_name or "").strip(),
+                            (ar.tab_name or "").strip(),
+                        )
+                        rules_map[key] = bool(ar.can_view)
 
             try:
                 modules: Iterable[Tuple[dict, object]] = discover_modules()
@@ -208,21 +265,55 @@ class RolesAccessTab(QWidget):
 
                 mitem = QTreeWidgetItem([mname, ""])
                 mitem.setFlags(mitem.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-                mitem.setData(0, Qt.UserRole, (mname, ""))
+                mitem.setData(0, Qt.UserRole, (mname, "", ""))
 
                 # children first
                 any_child = False
-                for sub in info.get("submodules", []):
+                tab_map = _manifest_tab_map(info)
+
+                # module-level tabs (no submodule)
+                for tab in tab_map.get("__module__", []):
+                    tabitem = QTreeWidgetItem([tab, ""])
+                    tabitem.setFlags(tabitem.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+                    tabitem.setData(0, Qt.UserRole, (mname, "", tab))
+                    tab_state = Qt.Checked if rules_map.get((mname, "", tab), False) else Qt.Unchecked
+                    tabitem.setCheckState(1, tab_state)
+                    mitem.addChild(tabitem)
+                    any_child = True
+
+                for sub in _manifest_submodules(info):
                     subitem = QTreeWidgetItem([sub, ""])
                     subitem.setFlags(subitem.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-                    subitem.setData(0, Qt.UserRole, (mname, sub))
-                    sub_checked = Qt.Checked if rules_map.get((mname, sub), False) else Qt.Unchecked
-                    subitem.setCheckState(1, sub_checked)
+                    subitem.setData(0, Qt.UserRole, (mname, sub, ""))
+
+                    # add tabs under this submodule
+                    for tab in tab_map.get(sub, []):
+                        tabitem = QTreeWidgetItem([tab, ""])
+                        tabitem.setFlags(tabitem.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+                        tabitem.setData(0, Qt.UserRole, (mname, sub, tab))
+                        tab_state = Qt.Checked if rules_map.get((mname, sub, tab), False) else Qt.Unchecked
+                        tabitem.setCheckState(1, tab_state)
+                        subitem.addChild(tabitem)
+
+                    # submodule state: explicit rule wins; otherwise derive from children
+                    if rules_map.get((mname, sub, ""), False):
+                        sub_state = Qt.Checked
+                    elif subitem.childCount():
+                        child_states = [subitem.child(i).checkState(1) for i in range(subitem.childCount())]
+                        if child_states and all(st == Qt.Checked for st in child_states):
+                            sub_state = Qt.Checked
+                        elif any(st == Qt.Checked for st in child_states):
+                            sub_state = Qt.PartiallyChecked
+                        else:
+                            sub_state = Qt.Unchecked
+                    else:
+                        sub_state = Qt.Unchecked
+                    subitem.setCheckState(1, sub_state)
                     mitem.addChild(subitem)
                     any_child = True
 
                 # parent state: explicit rule wins, else reflect children
-                if rules_map.get((mname, ""), False):
+                if rules_map.get((mname, "", ""), False):
                     mstate = Qt.Checked
                 elif any_child:
                     states = [mitem.child(i).checkState(1) for i in range(mitem.childCount())]
@@ -302,9 +393,9 @@ class RolesAccessTab(QWidget):
                 if key not in self.perm_checks:
                     # normalize legacy keys to new normalized form
                     # e.g. "module:Salary Management/Salary Review.view" -> "module:salary management/salary review.view"
-                    m = re.match(r"^module:(.+?)(?:/(.+?))?\.view$", raw.strip(), flags=re.IGNORECASE)
+                    m = re.match(r"^module:(.+?)(?:/(.+?))?(?:/(.+?))?\.view$", raw.strip(), flags=re.IGNORECASE)
                     if m:
-                        key = _perm_key(m.group(1), m.group(2))
+                        key = _perm_key(m.group(1), m.group(2), m.group(3))
                 if key in self.perm_checks:
                     self.perm_checks[key].setChecked(True)
 
@@ -313,19 +404,27 @@ class RolesAccessTab(QWidget):
         return {k for k, cb in self.perm_checks.items() if cb.isChecked()}
 
     def _iterate_tree_items(self):
-        for i in range(self.tree.topLevelItemCount()):
-            top = self.tree.topLevelItem(i)
-            yield top
-            for j in range(top.childCount()):
-                yield top.child(j)
+        def walk(item: QTreeWidgetItem):
+            yield item
+            for idx in range(item.childCount()):
+                yield from walk(item.child(idx))
 
-    def _collect_access_state(self) -> list[tuple[str, str, bool]]:
-        out: list[tuple[str, str, bool]] = []
+        for i in range(self.tree.topLevelItemCount()):
+            yield from walk(self.tree.topLevelItem(i))
+
+    def _collect_access_state(self) -> list[tuple[str, str, str, bool]]:
+        out: list[tuple[str, str, str, bool]] = []
         for it in self._iterate_tree_items():
-            mname, sub = it.data(0, Qt.UserRole)
+            data = it.data(0, Qt.UserRole)
+            if not data:
+                continue
+            if isinstance(data, tuple) and len(data) == 3:
+                mname, sub, tab = data
+            else:
+                continue
             st = it.checkState(1)
             want = (st == Qt.Checked)  # Partial counts as not saved
-            out.append((mname, sub or "", want))
+            out.append(((mname or ""), (sub or ""), (tab or ""), want))
         return out
 
     def _save_all(self):
@@ -359,17 +458,35 @@ class RolesAccessTab(QWidget):
                     s.delete(lnk)
 
             # access rules
-            cur_rules = {(ar.module_name.strip(), (ar.submodule_name or "").strip()): ar
-                         for ar in s.query(AccessRule).filter(AccessRule.role_id == r.id).all()}
+            cur_rules = {
+                (
+                    (ar.module_name or "").strip(),
+                    (ar.submodule_name or "").strip(),
+                    (ar.tab_name or "").strip(),
+                ): ar
+                for ar in s.query(AccessRule).filter(AccessRule.role_id == r.id).all()
+            }
 
-            want_set = {(m, sname) for (m, sname, want) in desired_rules if want}
+            want_set = {
+                (m.strip(), sub.strip(), tab.strip())
+                for (m, sub, tab, want) in desired_rules
+                if want and m.strip()
+            }
             # upsert wanted
             for key in want_set:
                 if key in cur_rules:
                     cur_rules[key].can_view = True
                 else:
-                    m, sub = key
-                    s.add(AccessRule(role_id=r.id, module_name=m, submodule_name=sub, can_view=True))
+                    m, sub, tab = key
+                    s.add(
+                        AccessRule(
+                            role_id=r.id,
+                            module_name=m,
+                            submodule_name=sub,
+                            tab_name=tab,
+                            can_view=True,
+                        )
+                    )
             # delete others
             for key, ar in list(cur_rules.items()):
                 if key not in want_set:
