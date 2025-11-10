@@ -20,7 +20,75 @@ from ....core.database import get_employee_session as SessionLocal
 from ....core.tenant import id as tenant_id
 from ..models import Employee, LeaveDefault, WorkScheduleDay, Holiday, LeaveEntitlement, SalaryHistory
 
-# ---------------- utils ----------------
+# expose key for main_window
+MODULE_KEY = "salary_management"
+
+def filter_tabs_by_access(self, allowed_keys: list[str] | set[str]):
+    allowed = set(allowed_keys or [])
+    if not allowed:
+        return  # empty = show all
+    label_by_key = {
+        "summary":  "Summary",
+        "review":   "Salary Review",
+        "vouchers": "Salary Vouchers",
+        "settings": "Settings",
+    }
+    allowed_labels = {label_by_key[k] for k in allowed if k in label_by_key}
+    for i in range(self.tabs.count() - 1, -1, -1):
+        if self.tabs.tabText(i) not in allowed_labels:
+            self.tabs.removeTab(i)
+
+# =================== ACL helpers and module meta ===================
+
+MODULE_NAME = "Leave Management"
+SUBMODULES = ["Summary", "Application", "All Details", "Adjustments", "Calendar", "User Application History"]
+
+# try to import your real auth/permission functions; fall back to permissive no-ops
+try:
+    from ....core.auth import get_current_user  # type: ignore
+except Exception:
+    def get_current_user():
+        class _U:  # minimal shape
+            id = None
+            role = "superadmin"
+        return _U()
+
+try:
+    from ....core.permissions import can_view  # type: ignore
+except Exception:
+    def can_view(_user_id, _module, _submodule) -> bool:
+        return True
+
+def _gate_subtabs(root: QWidget, module_name: str, submodules: List[str]) -> None:
+    """Hide tabs that current user cannot view. Safe no-op on failure."""
+    try:
+        u = get_current_user()
+        if not u or getattr(u, "role", "") == "superadmin":
+            return
+        allowed = {s for s in submodules if can_view(getattr(u, "id", None), module_name, s)}
+        for tw in root.findChildren(QTabWidget):
+            titles = [tw.tabText(i) for i in range(tw.count())]
+            if not any(t in submodules for t in titles):
+                continue
+            for i in reversed(range(tw.count())):
+                if tw.tabText(i) not in allowed:
+                    tw.removeTab(i)
+    except Exception:
+        # never block UI due to ACL errors
+        return
+
+def _select_tab(root: QWidget, name: str) -> None:
+    """Focus the first QTabWidget tab whose title matches name."""
+    try:
+        for tw in root.findChildren(QTabWidget):
+            for i in range(tw.count()):
+                if tw.tabText(i) == name:
+                    tw.setCurrentIndex(i)
+                    return
+    except Exception:
+        return
+
+# =================== utils ===================
 
 def _safe_date(obj, *field_names: str) -> Optional[date]:
     for fn in field_names:
@@ -64,7 +132,12 @@ def _as_bool(x) -> bool:
 
 def _current_user() -> str:
     """Replace with your actual auth/user provider later."""
-    return "admin"
+    try:
+        u = get_current_user()
+        # prefer username if present, else id, else placeholder
+        return getattr(u, "username", None) or str(getattr(u, "id", "") or "user")
+    except Exception:
+        return "user"
 
 # ---- sqlite helpers ----
 def _has_column(raw_conn, table: str, column: str) -> bool:
@@ -333,7 +406,6 @@ def _used_days_total_year(session, emp_id: int, leave_type: str, year: int, incl
         used = used - adj
     return round(float(used), 3)
 
-
 # ---------------- entitlement engine ----------------
 
 def _entitlement_asof(session, emp: Employee, leave_type: str, as_of: date) -> float:
@@ -472,6 +544,26 @@ class LeaveModuleWidget(QWidget):
         self.tabs.addTab(self._adjustments_tab, "Adjustments")
         self.tabs.addTab(self._calendar_tab, "Calendar")
         self.tabs.addTab(self._user_history_tab, "User Application History")
+
+        # Gate sub-tabs based on permissions. Safe no-op if permissions not wired.
+        _gate_subtabs(self, MODULE_NAME, SUBMODULES)
+
+    MODULE_KEY = "leave_management"
+
+    def filter_tabs_by_access(self, allowed_keys: list[str] | set[str]):
+        allowed = set(allowed_keys or [])
+        if not allowed:
+            return
+        label_by_key = {
+            "summary": "Summary",
+            "all_details": "All Details",
+            "calendar": "Calendar",
+        }
+        allowed_labels = {label_by_key[k] for k in allowed if k in label_by_key}
+        for i in range(self.tabs.count() - 1, -1, -1):
+            if self.tabs.tabText(i) not in allowed_labels:
+                self.tabs.removeTab(i)
+
 
     # ----- Summary -----
     def _init_summary_tab(self):
@@ -1476,3 +1568,18 @@ def entitlement_for_year_end(session, emp: Employee, leave_type: str, year: int)
 
 def used_for_year(session, emp_id: int, leave_type: str, year: int, include_adjustments: bool = True) -> float:
     return _used_days_total_year(session, emp_id, leave_type, year, include_adjustments)
+
+# ---------------- module entrypoints (for main_window) ----------------
+
+def get_widget() -> QWidget:
+    """Return the Leave module root widget with tabs already gated."""
+    w = LeaveModuleWidget()
+    # gating already applied in __init__, but call again safely if needed
+    _gate_subtabs(w, MODULE_NAME, SUBMODULES)
+    return w
+
+def get_submodule_widget(sub: str) -> QWidget:
+    """Return widget focused on a specific submodule tab title."""
+    w = get_widget()
+    _select_tab(w, sub)
+    return w

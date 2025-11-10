@@ -21,13 +21,78 @@ from ....core.tenant import id as tenant_id
 from ..models import Employee
 from ....core.models import CompanySettings
 
+# -------- Roles & Access manifest --------
+MODULE_KEY = "salary_management"
+MODULE_NAME = "Salary Management"
+SUBMODULES = [
+    ("summary",  "Summary"),
+    ("review",   "Salary Review"),
+    ("vouchers", "Salary Vouchers"),
+    ("settings", "Settings"),
+]
+
+def module_manifest() -> dict:
+    return {
+        "key": MODULE_KEY,
+        "name": MODULE_NAME,
+        "submodules": [{"key": k, "name": n} for k, n in SUBMODULES],
+    }
+
 # ---------- globals / helpers ----------
-_VOUCHER_FMT = "SV-{YYYY}{MM}-{EMP}"  # editable from Settings
+_VOUCHER_FMT = "SV-{YYYY}{MM}-{EMP}"  # default; load/persist via payroll_settings table
 _STAMP_B64: Optional[str] = None  # set from Settings → Upload Company Stamp
 
 # CPF two-term offset constant requested: TW minus 500
 # Keep this constant unless future policy changes.
 _CPF_TW_MINUS_OFFSET = 500.0
+
+
+def _ensure_payroll_settings_table():
+    from sqlalchemy import text
+    with MainSession() as s:
+        s.execute(text("""
+            CREATE TABLE IF NOT EXISTS payroll_settings (
+                account_id     TEXT PRIMARY KEY NOT NULL,
+                voucher_format TEXT
+            );
+        """))
+        s.commit()
+
+
+def _load_voucher_format_from_db() -> None:
+    """Load persisted voucher format into global _VOUCHER_FMT."""
+    from sqlalchemy import text
+    global _VOUCHER_FMT
+    try:
+        _ensure_payroll_settings_table()
+        with MainSession() as s:
+            row = s.execute(
+                text("SELECT voucher_format FROM payroll_settings WHERE account_id=:a"),
+                {"a": str(tenant_id())}
+            ).fetchone()
+            if row and (row.voucher_format or "").strip():
+                _VOUCHER_FMT = row.voucher_format.strip()
+    except Exception:
+        # keep default if anything fails
+        pass
+
+
+def _save_voucher_format_to_db(fmt: str) -> None:
+    from sqlalchemy import text
+    try:
+        _ensure_payroll_settings_table()
+        with MainSession() as s:
+            s.execute(
+                text("""
+                    INSERT INTO payroll_settings(account_id, voucher_format)
+                    VALUES (:a, :f)
+                    ON CONFLICT(account_id) DO UPDATE SET voucher_format=excluded.voucher_format
+                """),
+                {"a": str(tenant_id()), "f": fmt}
+            )
+            s.commit()
+    except Exception:
+        pass
 
 
 def _format_voucher_code(emp: Employee | None, year: int, month_index_1: int) -> str:
@@ -368,6 +433,9 @@ class SalaryModuleWidget(QWidget):
         v = QVBoxLayout(self)
         v.addWidget(self.tabs)
 
+        # Load persisted voucher format once per widget init
+        _load_voucher_format_from_db()
+
         self._company_stamp_b64: Optional[str] = None
 
         self._build_summary_tab()
@@ -383,6 +451,24 @@ class SalaryModuleWidget(QWidget):
                 globals()["_STAMP_B64"] = self._company_stamp_b64
             except Exception:
                 pass
+
+    # expose key for main_window
+    MODULE_KEY = "salary_management"
+
+    def filter_tabs_by_access(self, allowed_keys: list[str] | set[str]):
+        allowed = set(allowed_keys or [])
+        if not allowed:
+            return  # empty = show all
+        label_by_key = {
+            "summary": "Summary",
+            "review": "Salary Review",
+            "vouchers": "Salary Vouchers",
+            "settings": "Settings",
+        }
+        allowed_labels = {label_by_key[k] for k in allowed if k in label_by_key}
+        for i in range(self.tabs.count() - 1, -1, -1):
+            if self.tabs.tabText(i) not in allowed_labels:
+                self.tabs.removeTab(i)
 
     # -- Summary
     def _build_summary_tab(self):
@@ -1576,123 +1662,56 @@ class SalaryModuleWidget(QWidget):
                 s.execute(text("""
                                CREATE TABLE IF NOT EXISTS cpf_rules_v2
                                (
-                                   id
-                                   INTEGER
-                                   PRIMARY
-                                   KEY
-                                   AUTOINCREMENT,
-                                   account_id
-                                   TEXT
-                                   NOT
-                                   NULL,
-                                   age_bracket
-                                   TEXT
-                                   NOT
-                                   NULL,
-                                   residency
-                                   TEXT
-                                   NOT
-                                   NULL,
-                                   pr_year
-                                   INTEGER,
-                                   salary_from
-                                   REAL,
-                                   salary_to
-                                   REAL,
-                                   total_pct_tw
-                                   REAL,
-                                   total_pct_tw_minus
-                                   REAL,
-                                   ee_pct_tw
-                                   REAL,
-                                   ee_pct_tw_minus
-                                   REAL,
-                                   cpf_total_cap
-                                   REAL,
-                                   cpf_employee_cap
-                                   REAL,
-                                   effective_from
-                                   TEXT,
-                                   notes
-                                   TEXT
+                                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                   account_id TEXT NOT NULL,
+                                   age_bracket TEXT NOT NULL,
+                                   residency TEXT NOT NULL,
+                                   pr_year INTEGER,
+                                   salary_from REAL,
+                                   salary_to REAL,
+                                   total_pct_tw REAL,
+                                   total_pct_tw_minus REAL,
+                                   ee_pct_tw REAL,
+                                   ee_pct_tw_minus REAL,
+                                   cpf_total_cap REAL,
+                                   cpf_employee_cap REAL,
+                                   effective_from TEXT,
+                                   notes TEXT
                                )"""))
                 s.execute(text("""
                                CREATE TABLE IF NOT EXISTS shg_rules_v2
                                (
-                                   id
-                                   INTEGER
-                                   PRIMARY
-                                   KEY
-                                   AUTOINCREMENT,
-                                   account_id
-                                   TEXT
-                                   NOT
-                                   NULL,
-                                   shg
-                                   TEXT
-                                   NOT
-                                   NULL,
-                                   income_from
-                                   REAL,
-                                   income_to
-                                   REAL,
-                                   contribution_type
-                                   TEXT,
-                                   contribution_value
-                                   REAL,
-                                   effective_from
-                                   TEXT,
-                                   notes
-                                   TEXT
+                                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                   account_id TEXT NOT NULL,
+                                   shg TEXT NOT NULL,
+                                   income_from REAL,
+                                   income_to REAL,
+                                   contribution_type TEXT,
+                                   contribution_value REAL,
+                                   effective_from TEXT,
+                                   notes TEXT
                                )"""))
                 s.execute(text("""
                                CREATE TABLE IF NOT EXISTS sdl_rules_v2
                                (
-                                   id
-                                   INTEGER
-                                   PRIMARY
-                                   KEY
-                                   AUTOINCREMENT,
-                                   account_id
-                                   TEXT
-                                   NOT
-                                   NULL,
-                                   salary_from
-                                   REAL,
-                                   salary_to
-                                   REAL,
-                                   rate_type
-                                   TEXT,
-                                   rate_value
-                                   REAL,
-                                   effective_from
-                                   TEXT,
-                                   notes
-                                   TEXT
+                                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                   account_id TEXT NOT NULL,
+                                   salary_from REAL,
+                                   salary_to REAL,
+                                   rate_type TEXT,
+                                   rate_value REAL,
+                                   effective_from TEXT,
+                                   notes TEXT
                                )"""))
                 # Race map table used elsewhere
                 s.execute(text("""
                                CREATE TABLE IF NOT EXISTS shg_race_map
                                (
-                                   account_id
-                                   TEXT
-                                   NOT
-                                   NULL,
-                                   race
-                                   TEXT
-                                   NOT
-                                   NULL,
-                                   shg
-                                   TEXT
-                                   NOT
-                                   NULL,
-                                   PRIMARY
-                                   KEY
-                               (
-                                   account_id,
-                                   race
-                               )
-                                   )"""))
+                                   account_id TEXT NOT NULL,
+                                   race TEXT NOT NULL,
+                                   shg TEXT NOT NULL,
+                                   PRIMARY KEY (account_id, race)
+                               )"""))
                 s.commit()
 
         _ensure_settings_tables()
@@ -1860,6 +1879,7 @@ class SalaryModuleWidget(QWidget):
         def _apply_format():
             fmt = (self.voucher_format.text().strip() or "SV-{YYYY}{MM}-{EMP}")
             globals()["_VOUCHER_FMT"] = fmt
+            _save_voucher_format_to_db(fmt)
             _preview_code()
             try:
                 self._refresh_voucher_preview()

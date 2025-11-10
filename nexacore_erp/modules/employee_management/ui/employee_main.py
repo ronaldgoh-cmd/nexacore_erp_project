@@ -15,6 +15,22 @@ from PySide6.QtWidgets import (
 from PySide6.QtWidgets import QCalendarWidget  # add this near your other QtWidgets imports
 from PySide6.QtWidgets import QDoubleSpinBox
 
+# -------- Roles & Access manifest --------
+MODULE_KEY = "employee_management"
+MODULE_NAME = "Employee Management"
+SUBMODULES = [
+    ("list",     "Employee List"),
+    ("defaults", "Default Leave"),   # change if your tab label differs
+    ("settings", "Settings"),        # change if needed
+]
+
+def module_manifest() -> dict:
+    return {
+        "key": MODULE_KEY,
+        "name": MODULE_NAME,
+        "submodules": [{"key": k, "name": n} for k, n in SUBMODULES],
+    }
+
 # ---- shared date helpers ----
 MIN_DATE = date(1900, 1, 1)
 def _fmt_date(d: date | None) -> str:
@@ -117,6 +133,8 @@ except Exception:
 
 from ....core.database import get_employee_session as SessionLocal
 from ....core.tenant import id as tenant_id
+from ....core.permissions import can_view
+from ....core.auth import get_current_user
 from ..models import (
     Employee, SalaryHistory, Holiday, DropdownOption, LeaveDefault,
     WorkScheduleDay, LeaveEntitlement
@@ -203,9 +221,60 @@ class EmployeeMainWidget(QWidget):
         v = QVBoxLayout(self)
         v.addWidget(self.tabs)
 
-        self._build_employee_list_tab()
-        self._build_holidays_tab()
-        self._build_settings_tab()
+        added = False
+        if self._allowed("Employee List"):
+            self._build_employee_list_tab(); added = True
+        if self._allowed("Holidays"):
+            self._build_holidays_tab(); added = True
+        if self._allowed("Employee Settings"):
+            self._build_settings_tab(); added = True
+
+        if not added:
+            self._no_access_placeholder()
+
+    MODULE_KEY = "employee_management"
+
+    def filter_tabs_by_access(self, allowed_keys: list[str] | set[str]):
+        allowed = set(allowed_keys or [])
+        if not allowed:
+            return
+        label_by_key = {
+            "list": "Employee List",
+            "defaults": "Default Leave",
+            "settings": "Settings",
+        }
+        allowed_labels = {label_by_key[k] for k in allowed if k in label_by_key}
+        for i in range(self.tabs.count() - 1, -1, -1):
+            if self.tabs.tabText(i) not in allowed_labels:
+                self.tabs.removeTab(i)
+
+
+    def _allowed(self, sub_label: str) -> bool:
+        try:
+            u = get_current_user()
+            if not u:
+                return True  # avoid dead UI if unauthenticated context
+            if getattr(u, "role", "") == "superadmin" or getattr(u, "id", -1) < 0:
+                return True
+            return can_view(u.id, "Employee Management", sub_label)
+        except Exception:
+            return True  # fail-open to avoid breaking UI
+
+    def _no_access_placeholder(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        msg = QLabel("No access to any Employee Management submodule.")
+        msg.setAlignment(Qt.AlignCenter)
+        v.addWidget(msg)
+        self.tabs.addTab(w, "Access")
+
+    # optional: lets module.py switch to a target tab after constructing this widget
+    def select_tab(self, label: str):
+        target = (label or "").strip().lower()
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i).strip().lower() == target:
+                self.tabs.setCurrentIndex(i)
+                return
 
     # small helper: fetch dropdown option list for a category
     def _opts(self, category: str) -> list[str]:
