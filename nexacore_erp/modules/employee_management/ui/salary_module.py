@@ -725,7 +725,12 @@ class SalaryModuleWidget(QWidget):
             except Exception:
                 return None
 
+        def _is_casual(emp) -> bool:
+            return ((getattr(emp, "employment_type", "") or "").strip().lower() == "casual")
+
         def _cpf_for(emp, tw, on_date):
+            if _is_casual(emp):
+                return 0.0, 0.0, 0.0
             resid_emp = (getattr(emp, "residency", "") or "").strip().lower()
             age_years, has_fraction = _age(emp, on_date)
             pry = _employee_pr_year(emp)
@@ -757,17 +762,20 @@ class SalaryModuleWidget(QWidget):
                         if pry is None or pry != pr_year:
                             continue
 
-                    base_total = min(tw, cap_total) if cap_total else tw
-                    base_ee = min(tw, cap_ee) if cap_ee else tw
                     off = _CPF_TW_MINUS_OFFSET
 
-                    total_term1 = base_total * (tot_pct_tw / 100.0)
-                    total_term2 = max(base_total - off, 0.0) * (tot_pct_tw_m / 100.0)
-                    ee_term1 = base_ee * (ee_pct_tw / 100.0)
-                    ee_term2 = max(base_ee - off, 0.0) * (ee_pct_tw_m / 100.0)
+                    total_term1 = tw * (tot_pct_tw / 100.0)
+                    total_term2 = max(tw - off, 0.0) * (tot_pct_tw_m / 100.0)
+                    ee_term1 = tw * (ee_pct_tw / 100.0)
+                    ee_term2 = max(tw - off, 0.0) * (ee_pct_tw_m / 100.0)
 
-                    total_val = _round_dollar_half_up(total_term1 + total_term2)
-                    ee_val = _floor_dollar(ee_term1 + ee_term2)
+                    total_val_calc = _round_dollar_half_up(total_term1 + total_term2)
+                    ee_val_calc = _floor_dollar(ee_term1 + ee_term2)
+
+                    total_val = float(min(total_val_calc, cap_total)) if cap_total else float(total_val_calc)
+                    ee_val = float(min(ee_val_calc, cap_ee)) if cap_ee else float(ee_val_calc)
+                    if ee_val > total_val:
+                        ee_val = total_val
                     er_val = float(max(total_val - ee_val, 0.0))
                     return ee_val, er_val, float(ee_val + er_val)
 
@@ -908,7 +916,8 @@ class SalaryModuleWidget(QWidget):
                                    line_total      REAL    DEFAULT 0,
                                    ee_contrib      REAL    DEFAULT 0,
                                    er_contrib      REAL    DEFAULT 0,
-                                   total_cash      REAL    DEFAULT 0
+                                   total_cash      REAL    DEFAULT 0,
+                                   remarks         TEXT    DEFAULT ''
                                );
                                """))
                 try:
@@ -916,6 +925,8 @@ class SalaryModuleWidget(QWidget):
                     have = {c.name for c in cols}
                     if "advance" not in have:
                         s.execute(_t("ALTER TABLE payroll_batch_lines ADD COLUMN advance REAL DEFAULT 0;"))
+                    if "remarks" not in have:
+                        s.execute(_t("ALTER TABLE payroll_batch_lines ADD COLUMN remarks TEXT DEFAULT '';"))
                 except Exception:
                     pass
                 s.execute(_t("""
@@ -933,6 +944,8 @@ class SalaryModuleWidget(QWidget):
         HOURS_COLS = {6, 8}  # OT Hours, PT Hours
 
         def _fmt_cell(col, val_float):
+            if col in TEXT_COLS:
+                return str(val_float)
             if col in HOURS_COLS:
                 return f"{val_float:,.2f}"
             return f"${val_float:,.2f}"
@@ -1096,11 +1109,13 @@ class SalaryModuleWidget(QWidget):
             "OT Rate", "OT Hours", "PT Rate", "PT Hours",
             "Total", "Levy", "Advance", "SHG", "SDL",
             "CPF EE", "CPF ER", "CPF Total",
-            "EE Contrib", "ER Contrib", "Cash Payout"
+            "EE Contrib", "ER Contrib", "Cash Payout", "Remarks"
         ]
+        REMARKS_COL = COLS.index("Remarks")
         # Editable only these
-        EDITABLE = {1, 2, 3, 4, 5, 6, 7, 8, 10, 11}
+        EDITABLE = {1, 2, 3, 4, 5, 6, 7, 8, 10, 11, REMARKS_COL}
         from PySide6.QtGui import QColor, QBrush
+        TEXT_COLS = {REMARKS_COL}
         DERIVED = set(range(len(COLS))) - (EDITABLE | {0})
         DERIVED_COLOR = QColor("#7a1f1f")  # dark red for uneditable fields
 
@@ -1119,15 +1134,16 @@ class SalaryModuleWidget(QWidget):
             m = cb_month.currentIndex() + 1
             on_date = _date(y, m, monthrange(y, m)[1])
 
-            shg = _shg_for(emp_obj, gross, on_date)
-            sdl = _sdl_for(gross, on_date)
-
-            # If Total (gross) is 0 → SDL = 0 and SHG (e.g., CDAC) = 0
-            if gross <= 0.0:
+            if gross <= 0.0 or _is_casual(emp_obj):
                 shg = 0.0
                 sdl = 0.0
-
-            ee, er, cpf_t = _cpf_for(emp_obj, gross, on_date)
+                ee = 0.0
+                er = 0.0
+                cpf_t = 0.0
+            else:
+                shg = _shg_for(emp_obj, gross, on_date)
+                sdl = _sdl_for(gross, on_date)
+                ee, er, cpf_t = _cpf_for(emp_obj, gross, on_date)
             ee_c = ee + shg
             er_c = er + sdl + levy
             cash = gross - ee - shg - adv
@@ -1154,6 +1170,8 @@ class SalaryModuleWidget(QWidget):
             sums = [0.0] * t.columnCount()
             for r in range(t.rowCount()):
                 for c in range(t.columnCount()):
+                    if c in TEXT_COLS:
+                        continue
                     try:
                         sums[c] += _rf(t.item(r, c).text())
                     except Exception:
@@ -1241,7 +1259,8 @@ class SalaryModuleWidget(QWidget):
                                                   l.cpf_total,
                                                   l.ee_contrib,
                                                   l.er_contrib,
-                                                  l.total_cash
+                                                  l.total_cash,
+                                                  l.remarks
                                            FROM payroll_batch_lines l
                                                     JOIN employees e ON e.id = l.employee_id
                                            WHERE l.batch_id = :b
@@ -1270,6 +1289,16 @@ class SalaryModuleWidget(QWidget):
                                 it.setForeground(QBrush(DERIVED_COLOR))
                         grid.setItem(r, c, it)
 
+                    def puttext(c, v, editable):
+                        it = QTableWidgetItem(str(v or ""))
+                        it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                        flags = it.flags()
+                        if editable and (not read_only):
+                            it.setFlags(flags | Qt.ItemIsEditable)
+                        else:
+                            it.setFlags(flags & ~Qt.ItemIsEditable)
+                        grid.setItem(r, c, it)
+
                     putnum(1, ln.basic_salary, True)
                     putnum(2, ln.commission, True)
                     putnum(3, ln.incentives, True)
@@ -1292,6 +1321,7 @@ class SalaryModuleWidget(QWidget):
                     putnum(17, ln.ee_contrib, False)
                     putnum(18, ln.er_contrib, False)
                     putnum(19, ln.total_cash, False)
+                    puttext(REMARKS_COL, getattr(ln, "remarks", ""), True)
 
                     with SessionLocal() as s:
                         row_emps.append(s.get(Employee, int(ln.employee_id)))
@@ -1372,6 +1402,14 @@ class SalaryModuleWidget(QWidget):
                         it.setForeground(QBrush(DERIVED_COLOR))
                         grid.setItem(r, c, it)
 
+                    remark_it = QTableWidgetItem("")
+                    remark_it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                    if not read_only:
+                        remark_it.setFlags(remark_it.flags() | Qt.ItemIsEditable)
+                    else:
+                        remark_it.setFlags(remark_it.flags() & ~Qt.ItemIsEditable)
+                    grid.setItem(r, REMARKS_COL, remark_it)
+
                     row_emps.append(e)
 
             # initial compute
@@ -1380,7 +1418,7 @@ class SalaryModuleWidget(QWidget):
 
             if not read_only:
                 def _cell_changed(r, c):
-                    if c not in EDITABLE:
+                    if c not in EDITABLE or c in TEXT_COLS:
                         return
                     _recalc_row(grid, r, row_emps[r], on_date)
 
@@ -1416,15 +1454,30 @@ class SalaryModuleWidget(QWidget):
 
                     for r in range(grid.rowCount()):
                         emp = row_emps[r]
-                        vals = [grid.item(r, c).text() if grid.item(r, c) else "0" for c in range(1, len(COLS))]
-                        nums = [_rf(v) for v in vals]
-                        (
-                            basic, comm, inc, allw,
-                            ot_r, ot_h, pt_r, pt_h,
-                            tot, levy, adv, shg, sdl,
-                            cpf_ee, cpf_er, cpf_t,
-                            ee_c, er_c, cash
-                        ) = nums
+                        def _txt(col):
+                            it = grid.item(r, col)
+                            return it.text() if it else ""
+
+                        basic = _rf(_txt(1))
+                        comm = _rf(_txt(2))
+                        inc = _rf(_txt(3))
+                        allw = _rf(_txt(4))
+                        ot_r = _rf(_txt(5))
+                        ot_h = _rf(_txt(6))
+                        pt_r = _rf(_txt(7))
+                        pt_h = _rf(_txt(8))
+                        tot = _rf(_txt(9))
+                        levy = _rf(_txt(10))
+                        adv = _rf(_txt(11))
+                        shg = _rf(_txt(12))
+                        sdl = _rf(_txt(13))
+                        cpf_ee = _rf(_txt(14))
+                        cpf_er = _rf(_txt(15))
+                        cpf_t = _rf(_txt(16))
+                        ee_c = _rf(_txt(17))
+                        er_c = _rf(_txt(18))
+                        cash = _rf(_txt(19))
+                        remarks_val = _txt(REMARKS_COL).strip()
                         s.execute(text("""
                                        INSERT INTO payroll_batch_lines(batch_id, employee_id, basic_salary, commission,
                                                                        incentives, allowance,
@@ -1432,16 +1485,18 @@ class SalaryModuleWidget(QWidget):
                                                                        part_time_hours,
                                                                        levy, advance, shg, sdl, cpf_emp, cpf_er,
                                                                        cpf_total,
-                                                                       line_total, ee_contrib, er_contrib, total_cash)
+                                                                       line_total, ee_contrib, er_contrib, total_cash,
+                                                                       remarks)
                                        VALUES (:b, :e, :ba, :co, :in, :al, :otr, :oth, :ptr, :pth, :lev, :adv, :shg, :sdl,
-                                               :ee, :er, :cpt, :lt, :eec, :erc, :cash)
+                                               :ee, :er, :cpt, :lt, :eec, :erc, :cash, :rmk)
                                        """), {
                             "b": batch_id_local, "e": int(emp.id),
                             "ba": basic, "co": comm, "in": inc, "al": allw,
                             "otr": ot_r, "oth": ot_h, "ptr": pt_r, "pth": pt_h,
                             "lev": levy, "adv": adv, "shg": shg, "sdl": sdl,
                             "ee": cpf_ee, "er": cpf_er, "cpt": cpf_t,
-                            "lt": tot, "eec": ee_c, "erc": er_c, "cash": cash
+                            "lt": tot, "eec": ee_c, "erc": er_c, "cash": cash,
+                            "rmk": remarks_val
                         })
                     s.commit()
                 return batch_id_local
