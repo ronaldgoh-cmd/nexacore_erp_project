@@ -37,6 +37,7 @@ class MainWindow(QMainWindow):
 
         self.user = None
         self.user_settings = None
+        self._closing_for_logout = False
 
         # ---------- Fixed vertical header (always top) ----------
         header = self._build_header_widget()
@@ -460,5 +461,22 @@ class MainWindow(QMainWindow):
         Do not show a login dialog here.
         Close this window and let app.py show ONLY the login panel.
         """
+        if self._closing_for_logout:
+            return
+
+        self._closing_for_logout = True
         self.logout_requested.emit()
-        self.close()
+
+        if self.isVisible():
+            super().close()
+
+    # Ensure clicking the window close button behaves like a logout
+    def closeEvent(self, event):  # noqa: N802 (Qt override camelCase)
+        if self._closing_for_logout:
+            super().closeEvent(event)
+            self._closing_for_logout = False
+            return
+
+        event.ignore()
+        self._closing_for_logout = True
+        self.do_logout()
