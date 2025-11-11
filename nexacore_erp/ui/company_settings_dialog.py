@@ -102,28 +102,31 @@ class CompanySettingsDialog(QDialog):
         v.addWidget(info_lbl)
 
         lw = QListWidget()
-        lw.setSelectionMode(lw.MultiSelection)
         for label, key, path in module_entries:
             item = QListWidgetItem(label, lw)
             item.setData(Qt.UserRole, {"key": key, "path": path})
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
         v.addWidget(lw)
 
         run = QPushButton("Wipe Selected")
         v.addWidget(run)
 
         def wipe():
-            items = lw.selectedItems()
-            if not items:
+            checked_items = [
+                lw.item(i) for i in range(lw.count()) if lw.item(i).checkState() == Qt.Checked
+            ]
+            if not checked_items:
                 QMessageBox.information(d, "Factory Reset", "Select at least one module database to wipe.")
                 return
-            summary = "\n".join(it.text() for it in items)
+            summary = "\n".join(it.text() for it in checked_items)
             if QMessageBox.question(
                 d,
                 "Confirm Wipe",
                 f"Delete the following module database(s)?\n\n{summary}",
             ) != QMessageBox.Yes:
                 return
-            for it in items:
+            for it in checked_items:
                 data = it.data(Qt.UserRole) or {}
                 key = data.get("key")
                 if key:
