@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from ....core.database import get_employee_session as SessionLocal, get_main_session as MainSession
 from ....core.tenant import id as tenant_id
+from ....core.events import employee_events
 from ..models import Employee
 from ....core.models import CompanySettings
 
@@ -452,6 +453,8 @@ class SalaryModuleWidget(QWidget):
             except Exception:
                 pass
 
+        employee_events.employees_changed.connect(self._handle_employees_changed)
+
     # expose key for main_window
     MODULE_KEY = "salary_management"
 
@@ -508,6 +511,10 @@ class SalaryModuleWidget(QWidget):
         # Init dropdowns + data
         self._load_departments_for_summary()
         self.tabs.addTab(host, "Summary")
+        self._reload_summary()
+
+    def _handle_employees_changed(self):
+        self._load_departments_for_summary()
         self._reload_summary()
 
     def _load_departments_for_summary(self):
