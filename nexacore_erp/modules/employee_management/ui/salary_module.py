@@ -1271,7 +1271,7 @@ class SalaryModuleWidget(QWidget):
             on_date = _date(y, m, monthrange(y, m)[1])
             row_emps = []
 
-            def _set_row_header(r, name, *, level: int = 0, bold: bool = False, color: str | None = None):
+            def _set_row_header(r, name, *, level: int = 0, bold: bool = False):
                 text = f"{'    ' * level}{(name or '').strip()}"
                 hi = QTableWidgetItem(text)
                 hi.setToolTip((name or "").strip())
@@ -1279,18 +1279,19 @@ class SalaryModuleWidget(QWidget):
                     font = hi.font()
                     font.setBold(True)
                     hi.setFont(font)
-                if color:
-                    hi.setForeground(QBrush(QColor(color)))
                 grid.setVerticalHeaderItem(r, hi)
 
             def _add_group_header(label: str, level: int):
                 r = grid.rowCount()
                 grid.insertRow(r)
                 row_emps.append(None)
-                header_rows.add(r)
-                text_color = "#0f172a" if level == 0 else "#374151"
-                _set_row_header(r, label, level=level, bold=True, color=text_color)
-                grid.setRowHeight(r, 24 if level else 28)
+                _set_row_header(r, label, level=level, bold=True)
+                shade = "#f3f4f6" if level == 0 else "#f9fafb"
+                for c in range(grid.columnCount()):
+                    it = QTableWidgetItem("")
+                    it.setFlags(Qt.ItemIsEnabled)
+                    it.setBackground(QBrush(QColor(shade)))
+                    grid.setItem(r, c, it)
 
             def _add_employee_row(emp: Employee, line_data=None):
                 r = grid.rowCount()
