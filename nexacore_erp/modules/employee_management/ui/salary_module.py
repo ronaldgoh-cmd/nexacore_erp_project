@@ -991,19 +991,72 @@ class SalaryModuleWidget(QWidget):
                 self._header_checker = header_checker
 
             def paint(self, painter, option, index):
-                from PySide6.QtGui import QPainter, QColor, QPen
+                from PySide6.QtGui import QColor, QPen, QBrush
                 opt = QStyleOptionViewItem(option)
                 opt.displayAlignment = Qt.AlignCenter | Qt.AlignVCenter
                 opt.state &= ~QStyle.State_HasFocus
-                super().paint(painter, opt, index)
                 if self._header_checker(index.row()):
+                    opt.state &= ~QStyle.State_Selected
+                    opt.state &= ~QStyle.State_MouseOver
+                    painter.save()
+                    brush = index.data(Qt.BackgroundRole)
+                    if isinstance(brush, QBrush):
+                        painter.fillRect(opt.rect, brush)
+                    elif brush:
+                        painter.fillRect(opt.rect, QBrush(brush))
+                    else:
+                        painter.fillRect(opt.rect, opt.palette.base())
+                    text = index.data(Qt.DisplayRole)
+                    if text:
+                        text_color = opt.palette.text().color()
+                        painter.setPen(text_color)
+                        header_font = QFont(opt.font)
+                        header_font.setBold(True)
+                        painter.setFont(header_font)
+                        margin = 12 + int(index.data(Qt.UserRole) or 0) * 16
+                        text_rect = opt.rect.adjusted(margin, 0, -12, 0)
+                        alignment = index.data(Qt.TextAlignmentRole)
+                        if alignment is None:
+                            alignment = Qt.AlignLeft | Qt.AlignVCenter
+                        painter.drawText(text_rect, alignment, text)
+                    painter.restore()
                     return
+
+                super().paint(painter, opt, index)
                 r = option.rect
                 pen = QPen(QColor("#e5e7eb"))
                 pen.setWidth(1)
                 painter.save()
                 painter.setPen(pen)
                 painter.drawRect(r.adjusted(0, 0, -1, -1))
+                painter.restore()
+
+        class _GroupHeaderDelegate(QStyledItemDelegate):
+            def paint(self, painter, option, index):
+                opt = QStyleOptionViewItem(option)
+                opt.state &= ~QStyle.State_HasFocus
+                opt.state &= ~QStyle.State_Selected
+                painter.save()
+                brush = index.data(Qt.BackgroundRole)
+                if isinstance(brush, QBrush):
+                    painter.fillRect(opt.rect, brush)
+                elif brush:
+                    painter.fillRect(opt.rect, QBrush(brush))
+                else:
+                    painter.fillRect(opt.rect, opt.palette.base())
+                text = index.data(Qt.DisplayRole)
+                if text:
+                    text_color = opt.palette.text().color()
+                    painter.setPen(text_color)
+                    header_font = QFont(opt.font)
+                    header_font.setBold(True)
+                    painter.setFont(header_font)
+                    margin = 12 + int(index.data(Qt.UserRole) or 0) * 16
+                    text_rect = opt.rect.adjusted(margin, 0, -12, 0)
+                    alignment = index.data(Qt.TextAlignmentRole)
+                    if alignment is None:
+                        alignment = Qt.AlignLeft | Qt.AlignVCenter
+                    painter.drawText(text_rect, alignment, text)
                 painter.restore()
 
         # ---------- UI: batches list ----------
@@ -1264,6 +1317,7 @@ class SalaryModuleWidget(QWidget):
             # Delegates
             nb = _NoBorderCenterDelegate(grid)
             bd = _BorderedCenterDelegate(_is_header_row, grid)
+            header_delegate = _GroupHeaderDelegate(grid)
             for c in range(len(COLS)):
                 grid.setItemDelegateForColumn(c, bd if c in EDITABLE else nb)
 
@@ -1285,13 +1339,25 @@ class SalaryModuleWidget(QWidget):
                 r = grid.rowCount()
                 grid.insertRow(r)
                 row_emps.append(None)
+                header_rows.add(r)
                 _set_row_header(r, label, level=level, bold=True)
                 shade = "#f3f4f6" if level == 0 else "#f9fafb"
-                for c in range(grid.columnCount()):
-                    it = QTableWidgetItem("")
-                    it.setFlags(Qt.ItemIsEnabled)
-                    it.setBackground(QBrush(QColor(shade)))
-                    grid.setItem(r, c, it)
+                hidden = QTableWidgetItem("")
+                hidden.setFlags(Qt.ItemIsEnabled)
+                hidden.setBackground(QBrush(QColor(shade)))
+                grid.setItem(r, 0, hidden)
+
+                item = QTableWidgetItem(label)
+                item.setFlags(Qt.ItemIsEnabled)
+                item.setBackground(QBrush(QColor(shade)))
+                item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                item.setData(Qt.UserRole, level)
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                grid.setItem(r, 1, item)
+                grid.setSpan(r, 1, 1, grid.columnCount() - 1)
+                grid.setItemDelegateForRow(r, header_delegate)
 
             def _add_employee_row(emp: Employee, line_data=None):
                 r = grid.rowCount()
