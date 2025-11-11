@@ -1,6 +1,17 @@
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QLineEdit, QPushButton, QLabel, QFileDialog, QTextEdit, QHBoxLayout
+from PySide6.QtWidgets import (
+    QDialog,
+    QVBoxLayout,
+    QLineEdit,
+    QPushButton,
+    QLabel,
+    QFileDialog,
+    QTextEdit,
+    QHBoxLayout,
+    QMessageBox,
+    QAbstractItemView,
+)
 from PySide6.QtGui import QPixmap
-from ..core.database import SessionLocal
+from ..core.database import SessionLocal, get_module_db_path, wipe_module_database
 from ..core.models import CompanySettings
 from ..core.plugins import discover_modules
 class CompanySettingsDialog(QDialog):
@@ -60,15 +71,66 @@ class CompanySettingsDialog(QDialog):
             s.commit()
         self.accept()
     def factory_reset(self):
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton
-        d = QDialog(self); d.setWindowTitle("Factory Reset")
-        v = QVBoxLayout(d)
-        lw = QListWidget(); lw.setSelectionMode(lw.MultiSelection)
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QListWidget, QListWidgetItem
+
+        module_entries: list[tuple[str, str, str]] = []
         for info, module in discover_modules():
-            lw.addItem(info.get("name", "Unknown"))
+            module_path = getattr(module.__class__, "__module__", "")
+            parts = module_path.split(".")
+            key = ""
+            if "modules" in parts:
+                idx = parts.index("modules")
+                if idx + 1 < len(parts):
+                    key = parts[idx + 1]
+            if not key or key == "account_management":
+                continue
+            path = get_module_db_path(key)
+            name = info.get("name") or key.replace("_", " ").title()
+            suffix = "" if path.exists() else " — no data file found"
+            module_entries.append((f"{name} ({path.name}){suffix}", key, str(path)))
+
+        if not module_entries:
+            QMessageBox.information(self, "Factory Reset", "No module databases are available to wipe.")
+            return
+
+        d = QDialog(self)
+        d.setWindowTitle("Factory Reset")
+        v = QVBoxLayout(d)
+
+        info_lbl = QLabel("Select the module databases to delete. Account data is preserved.")
+        info_lbl.setWordWrap(True)
+        v.addWidget(info_lbl)
+
+        lw = QListWidget()
+        lw.setSelectionMode(QAbstractItemView.MultiSelection)
+        for label, key, path in module_entries:
+            item = QListWidgetItem(label, lw)
+            item.setData(Qt.UserRole, {"key": key, "path": path})
+        v.addWidget(lw)
+
         run = QPushButton("Wipe Selected")
-        v.addWidget(lw); v.addWidget(run)
+        v.addWidget(run)
+
         def wipe():
-            for i in lw.selectedItems(): pass
+            items = lw.selectedItems()
+            if not items:
+                QMessageBox.information(d, "Factory Reset", "Select at least one module database to wipe.")
+                return
+            summary = "\n".join(it.text() for it in items)
+            if QMessageBox.question(
+                d,
+                "Confirm Wipe",
+                f"Delete the following module database(s)?\n\n{summary}",
+            ) != QMessageBox.Yes:
+                return
+            for it in items:
+                data = it.data(Qt.UserRole) or {}
+                key = data.get("key")
+                if key:
+                    wipe_module_database(key)
+            QMessageBox.information(d, "Factory Reset", "Selected module databases have been wiped.")
             d.accept()
-        run.clicked.connect(wipe); d.exec()
+
+        run.clicked.connect(wipe)
+        d.exec()

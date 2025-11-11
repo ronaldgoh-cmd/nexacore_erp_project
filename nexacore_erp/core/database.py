@@ -91,3 +91,25 @@ def init_module_db(module_key: str, base_metadata) -> None:
 # Convenience for Employee Management
 def get_employee_session():
     return get_module_sessionmaker("employee_management")()
+
+
+def get_module_db_path(module_key: str) -> Path:
+    """Return the filesystem path for a module's standalone database."""
+    return _module_db_path(module_key)
+
+
+def wipe_module_database(module_key: str) -> None:
+    """Dispose cached connections and delete a module's database file if present."""
+    eng = _module_engines.pop(module_key, None)
+    if eng is not None:
+        try:
+            eng.dispose()
+        except Exception:
+            pass
+    _module_sessions.pop(module_key, None)
+
+    path = _module_db_path(module_key)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass

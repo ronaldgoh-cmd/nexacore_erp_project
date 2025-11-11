@@ -167,6 +167,42 @@ MANAGED_CATEGORIES = [
     "ID Type", "Gender", "Race", "Country", "Residency",
     "Employment Pass", "Department", "Position", "Employment Type", "Bank"
 ]
+
+DEFAULT_DROPDOWN_OPTIONS: dict[str, list[str]] = {
+    "ID Type": ["FIN", "NRIC"],
+    "Gender": ["Male", "Female"],
+    "Race": ["Chinese", "Eurasian", "Indian", "Malay", "Others"],
+    "Employment Type": ["Casual", "Part Time", "Full Time"],
+    "Residency": ["Citizen", "Permanent Resident"],
+}
+
+
+def _ensure_dropdown_defaults(category: str) -> None:
+    defaults = DEFAULT_DROPDOWN_OPTIONS.get(category)
+    if not defaults:
+        return
+    with SessionLocal() as s:
+        existing = {
+            row[0]
+            for row in s.query(DropdownOption.value)
+            .filter(
+                DropdownOption.account_id == tenant_id(),
+                DropdownOption.category == category,
+            )
+            .all()
+        }
+        missing = [v for v in defaults if v not in existing]
+        if not missing:
+            return
+        for value in missing:
+            s.add(
+                DropdownOption(
+                    account_id=tenant_id(),
+                    category=category,
+                    value=value,
+                )
+            )
+        s.commit()
 # persist employee code format to a small json file next to this module
 SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "employee_settings.json")
 
@@ -217,6 +253,9 @@ class EmployeeMainWidget(QWidget):
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(_NO_WHEEL_FILTER)
+
+        for category in DEFAULT_DROPDOWN_OPTIONS:
+            _ensure_dropdown_defaults(category)
 
         self.tabs = QTabWidget(self)
         v = QVBoxLayout(self)
@@ -278,6 +317,7 @@ class EmployeeMainWidget(QWidget):
 
     # small helper: fetch dropdown option list for a category
     def _opts(self, category: str) -> list[str]:
+        _ensure_dropdown_defaults(category)
         with SessionLocal() as s:
             rows = s.query(DropdownOption)\
                     .filter(DropdownOption.account_id == tenant_id(),
@@ -1878,6 +1918,7 @@ class DropdownOptionsDialog(QDialog):
 
     def _reload_values(self, category: str):
         self.val_list.clear()
+        _ensure_dropdown_defaults(category)
         with SessionLocal() as s:
             rows = s.query(DropdownOption)\
                     .filter(DropdownOption.account_id == tenant_id(),
@@ -1908,6 +1949,9 @@ class DropdownOptionsDialog(QDialog):
         it = self.val_list.currentItem()
         if not it: return
         old = it.text()
+        if old in DEFAULT_DROPDOWN_OPTIONS.get(cat, []):
+            QMessageBox.information(self, "Dropdown", "Default values cannot be renamed.")
+            return
         new, ok = self._prompt("Rename value", "New value", old)
         if not ok or not new.strip() or new.strip() == old: return
         new = _clean_text(new)
@@ -1933,9 +1977,19 @@ class DropdownOptionsDialog(QDialog):
         cat = self.cat.currentText()
         items = self.val_list.selectedItems()
         if not items: return
-        if QMessageBox.question(self, "Dropdown", f"Delete {len(items)} selected value(s)?") != QMessageBox.Yes:
+        protected = set(DEFAULT_DROPDOWN_OPTIONS.get(cat, []))
+        blocked = [i.text() for i in items if i.text() in protected]
+        if blocked:
+            QMessageBox.information(
+                self,
+                "Dropdown",
+                "Default values cannot be deleted:\n- " + "\n- ".join(blocked),
+            )
+        vals = [i.text() for i in items if i.text() not in protected]
+        if not vals:
             return
-        vals = [i.text() for i in items]
+        if QMessageBox.question(self, "Dropdown", f"Delete {len(vals)} selected value(s)?") != QMessageBox.Yes:
+            return
         with SessionLocal() as s:
             for v in vals:
                 q = s.query(DropdownOption).filter(
