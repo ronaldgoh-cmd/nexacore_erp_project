@@ -412,8 +412,8 @@ class RolesAccessTab(QWidget):
         for i in range(self.tree.topLevelItemCount()):
             yield from walk(self.tree.topLevelItem(i))
 
-    def _collect_access_state(self) -> list[tuple[str, str, str, bool]]:
-        out: list[tuple[str, str, str, bool]] = []
+    def _collect_access_state(self) -> list[tuple[str, str, str, bool | None]]:
+        out: list[tuple[str, str, str, bool | None]] = []
         for it in self._iterate_tree_items():
             data = it.data(0, Qt.UserRole)
             if not data:
@@ -423,7 +423,12 @@ class RolesAccessTab(QWidget):
             else:
                 continue
             st = it.checkState(1)
-            want = (st == Qt.Checked)  # Partial counts as not saved
+            if st == Qt.Checked:
+                want: bool | None = True
+            elif st == Qt.Unchecked:
+                want = False
+            else:
+                want = None
             out.append(((mname or ""), (sub or ""), (tab or ""), want))
         return out
 
@@ -467,15 +472,19 @@ class RolesAccessTab(QWidget):
                 for ar in s.query(AccessRule).filter(AccessRule.role_id == r.id).all()
             }
 
-            want_set = {
-                (m.strip(), sub.strip(), tab.strip())
-                for (m, sub, tab, want) in desired_rules
-                if want and m.strip()
-            }
-            # upsert wanted
-            for key in want_set:
+            normalized_rules: dict[tuple[str, str, str], bool] = {}
+            for m, sub, tab, want in desired_rules:
+                nm = (m or "").strip()
+                ns = (sub or "").strip()
+                nt = (tab or "").strip()
+                if not nm or want is None:
+                    continue
+                normalized_rules[(nm, ns, nt)] = bool(want)
+
+            # upsert desired states (True and False)
+            for key, want in normalized_rules.items():
                 if key in cur_rules:
-                    cur_rules[key].can_view = True
+                    cur_rules[key].can_view = want
                 else:
                     m, sub, tab = key
                     s.add(
@@ -484,12 +493,13 @@ class RolesAccessTab(QWidget):
                             module_name=m,
                             submodule_name=sub,
                             tab_name=tab,
-                            can_view=True,
+                            can_view=want,
                         )
                     )
-            # delete others
+
+            # delete stale rules (e.g. when state becomes indeterminate/partial)
             for key, ar in list(cur_rules.items()):
-                if key not in want_set:
+                if key not in normalized_rules:
                     s.delete(ar)
 
             s.commit()
