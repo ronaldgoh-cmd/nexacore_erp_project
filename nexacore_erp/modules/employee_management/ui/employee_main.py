@@ -135,6 +135,7 @@ from ....core.database import get_employee_session as SessionLocal
 from ....core.tenant import id as tenant_id
 from ....core.permissions import can_view
 from ....core.auth import get_current_user
+from ....core.events import employee_events
 from ..models import (
     Employee, SalaryHistory, Holiday, DropdownOption, LeaveDefault,
     WorkScheduleDay, LeaveEntitlement
@@ -413,6 +414,12 @@ class EmployeeMainWidget(QWidget):
         self._all_rows = rows
         self._apply_filters()
 
+    def _notify_employees_changed(self):
+        try:
+            employee_events.employees_changed.emit()
+        except Exception:
+            pass
+
     def _apply_filters(self):
         txt = (self.quick_search.text() or "").lower().strip()
 
@@ -604,6 +611,7 @@ class EmployeeMainWidget(QWidget):
         d = EmployeeEditor(parent=self)
         if d.exec() == QDialog.Accepted:
             self._reload_employees()
+            self._notify_employees_changed()
 
     def _edit_employee(self):
         r = self.emp_table.currentRow()
@@ -621,6 +629,7 @@ class EmployeeMainWidget(QWidget):
                 if ii and ii.text() == str(emp_id):
                     self.emp_table.selectRow(i)
                     break
+            self._notify_employees_changed()
 
     def _delete_employee(self):
         r = self.emp_table.currentRow()
@@ -638,6 +647,7 @@ class EmployeeMainWidget(QWidget):
                 s.delete(e)
                 s.commit()
         self._reload_employees()
+        self._notify_employees_changed()
 
     # ---------------- Holidays ----------------
     def _build_holidays_tab(self):
@@ -1223,6 +1233,8 @@ class EmployeeMainWidget(QWidget):
             self._reload_employees()
         except Exception:
             pass
+        else:
+            self._notify_employees_changed()
         QMessageBox.information(self, "Import", f"Import complete. Created {created}, Updated {updated}.")
 
     def _export_employees_template(self):
@@ -1343,6 +1355,8 @@ class EmployeeMainWidget(QWidget):
             self._reload_employees()
         except Exception:
             pass
+        else:
+            self._notify_employees_changed()
 
         QMessageBox.information(self, "Employee Codes", "Codes updated.")
 

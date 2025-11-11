@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from ....core.database import get_employee_session as SessionLocal, get_main_session as MainSession
 from ....core.tenant import id as tenant_id
+from ....core.events import employee_events
 from ..models import Employee
 from ....core.models import CompanySettings
 
@@ -452,6 +453,8 @@ class SalaryModuleWidget(QWidget):
             except Exception:
                 pass
 
+        employee_events.employees_changed.connect(self._handle_employees_changed)
+
     # expose key for main_window
     MODULE_KEY = "salary_management"
 
@@ -508,6 +511,10 @@ class SalaryModuleWidget(QWidget):
         # Init dropdowns + data
         self._load_departments_for_summary()
         self.tabs.addTab(host, "Summary")
+        self._reload_summary()
+
+    def _handle_employees_changed(self):
+        self._load_departments_for_summary()
         self._reload_summary()
 
     def _load_departments_for_summary(self):
@@ -610,7 +617,7 @@ class SalaryModuleWidget(QWidget):
         def _age(emp, on_date):
             dob = getattr(emp, "dob", None) or getattr(emp, "date_of_birth", None)
             if not dob:
-                return 30
+                return 30, False
             try:
                 if isinstance(dob, str):
                     p = [int(t) for t in dob.replace("/", "-").split("-")]
@@ -621,8 +628,18 @@ class SalaryModuleWidget(QWidget):
                     from datetime import date as _date
                     dob = _date(y, m, d)
             except Exception:
-                return 30
-            return on_date.year - dob.year - ((on_date.month, on_date.day) < (dob.month, dob.day))
+                return 30, False
+
+            years = on_date.year - dob.year - ((on_date.month, on_date.day) < (dob.month, dob.day))
+            try:
+                anniv = dob.replace(year=dob.year + years)
+            except ValueError:
+                if dob.month == 2 and dob.day == 29:
+                    anniv = date(dob.year + years, 2, 28)
+                else:
+                    anniv = date(dob.year + years, dob.month, dob.day)
+            has_fraction = on_date > anniv
+            return years, has_fraction
 
         # ----- rounding rules for CPF -----
         from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN
@@ -710,42 +727,55 @@ class SalaryModuleWidget(QWidget):
 
         def _cpf_for(emp, tw, on_date):
             resid_emp = (getattr(emp, "residency", "") or "").strip().lower()
-            a = _age(emp, on_date)
+            age_years, has_fraction = _age(emp, on_date)
             pry = _employee_pr_year(emp)
 
-            for (
-                    age_br, resid_row, pr_year, sal_lo, sal_hi,
-                    tot_pct_tw, tot_pct_tw_m, ee_pct_tw, ee_pct_tw_m,
-                    cap_total, cap_ee, eff_from
-            ) in _cpf_rows():
+            age_candidates = []
+            if has_fraction and age_years >= 60:
+                age_candidates.append(age_years + 1)
+            age_candidates.append(age_years)
 
-                if resid_row.strip().lower() != resid_emp:
-                    continue
-                if eff_from and eff_from > on_date:
-                    continue
-                if not _match_age(age_br, a):
-                    continue
-                if sal_lo and tw < sal_lo:
-                    continue
-                if sal_hi and tw > sal_hi:
-                    continue
-                if pr_year is not None:
-                    if pry is None or pry != pr_year:
+            rows = _cpf_rows()
+            for age_value in age_candidates:
+                for (
+                        age_br, resid_row, pr_year, sal_lo, sal_hi,
+                        tot_pct_tw, tot_pct_tw_m, ee_pct_tw, ee_pct_tw_m,
+                        cap_total, cap_ee, eff_from
+                ) in rows:
+
+                    if resid_row.strip().lower() != resid_emp:
                         continue
+                    if eff_from and eff_from > on_date:
+                        continue
+                    if not _match_age(age_br, age_value):
+                        continue
+                    if sal_lo and tw < sal_lo:
+                        continue
+                    if sal_hi and tw > sal_hi:
+                        continue
+                    if pr_year is not None:
+                        if pry is None or pry != pr_year:
+                            continue
 
-                base_total = min(tw, cap_total) if cap_total else tw
-                base_ee = min(tw, cap_ee) if cap_ee else tw
-                off = _CPF_TW_MINUS_OFFSET
+                    off = _CPF_TW_MINUS_OFFSET
 
-                total_term1 = base_total * (tot_pct_tw / 100.0)
-                total_term2 = max(base_total - off, 0.0) * (tot_pct_tw_m / 100.0)
-                ee_term1 = base_ee * (ee_pct_tw / 100.0)
-                ee_term2 = max(base_ee - off, 0.0) * (ee_pct_tw_m / 100.0)
+                    total_term1 = tw * (tot_pct_tw / 100.0)
+                    total_term2 = max(tw - off, 0.0) * (tot_pct_tw_m / 100.0)
+                    ee_term1 = tw * (ee_pct_tw / 100.0)
+                    ee_term2 = max(tw - off, 0.0) * (ee_pct_tw_m / 100.0)
 
-                total_val = _round_dollar_half_up(total_term1 + total_term2)
-                ee_val = _floor_dollar(ee_term1 + ee_term2)
-                er_val = float(max(total_val - ee_val, 0.0))
-                return ee_val, er_val, float(ee_val + er_val)
+                    total_raw = total_term1 + total_term2
+                    ee_raw = ee_term1 + ee_term2
+
+                    if cap_total:
+                        total_raw = min(total_raw, cap_total)
+                    if cap_ee:
+                        ee_raw = min(ee_raw, cap_ee)
+
+                    total_val = _round_dollar_half_up(total_raw)
+                    ee_val = _floor_dollar(ee_raw)
+                    er_val = float(max(total_val - ee_val, 0.0))
+                    return ee_val, er_val, float(ee_val + er_val)
 
             return 0.0, 0.0, 0.0
 
