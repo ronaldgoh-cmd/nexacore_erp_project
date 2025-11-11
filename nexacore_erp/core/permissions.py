@@ -1,7 +1,7 @@
 # nexacore_erp/core/permissions.py
 from __future__ import annotations
 import re
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from .database import SessionLocal
 
 # Models: User is in core, the rest are in account_management
@@ -47,10 +47,8 @@ def can_view(
 ) -> bool:
     """
     Grants view if:
-      1) Role has perm 'module:{module}.view' (module level),
-         'module:{module}/{sub}.view' (submodule), or
-         'module:{module}/{sub}/{tab}.view' (tab), OR
-      2) An AccessRule exists for the role on that module/sub/tab with can_view=1.
+      - No explicit AccessRule deny exists for the location, and
+      - Either an AccessRule allow exists or the role owns the matching permission.
 
     Names are normalized to avoid whitespace/case mismatches.
     """
@@ -58,7 +56,83 @@ def can_view(
     skey = _norm(submodule_name or "")
     tkey = _norm(tab_name or "")
 
-    # Permission keys fallback path
+    with SessionLocal() as s:
+        rids = _user_role_ids(user_id, s)
+        if not rids:
+            return False
+
+        # Compare case-insensitively with trimming
+        def _exists(match_sub: str, match_tab: str, expect: bool) -> bool:
+            q = (
+                s.query(AccessRule)
+                .filter(
+                    AccessRule.role_id.in_(rids),
+                    func.lower(func.trim(AccessRule.module_name)) == mkey,
+                    func.lower(func.trim(AccessRule.submodule_name)) == match_sub,
+                    func.lower(func.trim(AccessRule.tab_name)) == match_tab,
+                    AccessRule.can_view == expect,
+                )
+            )
+            return s.query(q.exists()).scalar()
+
+        def _deny(match_sub: str, match_tab: str) -> bool:
+            return _exists(match_sub, match_tab, False)
+
+        def _allow(match_sub: str, match_tab: str) -> bool:
+            return _exists(match_sub, match_tab, True)
+
+        def _any_tab_allow(match_sub: str) -> bool:
+            q = (
+                s.query(AccessRule)
+                .filter(
+                    AccessRule.role_id.in_(rids),
+                    func.lower(func.trim(AccessRule.module_name)) == mkey,
+                    func.lower(func.trim(AccessRule.submodule_name)) == match_sub,
+                    func.lower(func.trim(AccessRule.tab_name)) != "",
+                    AccessRule.can_view == True,  # noqa: E712
+                )
+            )
+            return s.query(q.exists()).scalar()
+
+        def _any_child_allow() -> bool:
+            q = (
+                s.query(AccessRule)
+                .filter(
+                    AccessRule.role_id.in_(rids),
+                    func.lower(func.trim(AccessRule.module_name)) == mkey,
+                    AccessRule.can_view == True,  # noqa: E712
+                )
+                .filter(
+                    or_(
+                        func.lower(func.trim(AccessRule.submodule_name)) != "",
+                        func.lower(func.trim(AccessRule.tab_name)) != "",
+                    )
+                )
+            )
+            return s.query(q.exists()).scalar()
+
+        # explicit denies override everything
+        if tkey:
+            if _deny(skey, tkey) or _deny(skey, "") or _deny("", ""):
+                return False
+        elif skey:
+            if _deny(skey, "") or _deny("", ""):
+                return False
+        else:
+            if _deny("", ""):
+                return False
+
+        # explicit allows (or allowed children) grant access
+        if tkey and _allow(skey, tkey):
+            return True
+        if skey:
+            if _allow(skey, "") or _any_tab_allow(skey):
+                return True
+        else:
+            if _allow("", "") or _any_tab_allow("") or _any_child_allow():
+                return True
+
+    # Permission keys fallback path (no relevant AccessRule state)
     if tkey:
         perm_sub = skey or "__module__"
         if has_permission(user_id, f"module:{mkey}/{perm_sub}/{tkey}.view"):
@@ -68,31 +142,4 @@ def can_view(
             return True
     if has_permission(user_id, f"module:{mkey}.view"):
         return True
-
-    # AccessRule path
-    with SessionLocal() as s:
-        rids = _user_role_ids(user_id, s)
-        if not rids:
-            return False
-
-        # Compare case-insensitively with trimming
-        def _exists(match_sub: str, match_tab: str) -> bool:
-            q = (
-                s.query(AccessRule)
-                .filter(
-                    AccessRule.role_id.in_(rids),
-                    func.lower(func.trim(AccessRule.module_name)) == mkey,
-                    func.lower(func.trim(AccessRule.submodule_name)) == match_sub,
-                    func.lower(func.trim(AccessRule.tab_name)) == match_tab,
-                    AccessRule.can_view == True,  # noqa: E712
-                )
-            )
-            return s.query(q.exists()).scalar()
-
-        if _exists(skey, tkey):
-            return True
-        if tkey and _exists(skey, ""):
-            return True
-        if _exists("", ""):
-            return True
-        return False
+    return False
