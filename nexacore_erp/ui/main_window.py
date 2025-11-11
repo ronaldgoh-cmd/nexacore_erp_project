@@ -29,6 +29,8 @@ import re
 class MainWindow(QMainWindow):
     # Emitted when user clicks Logout. app.py listens, closes this window, then shows LoginDialog.
     logout_requested = Signal()
+    # Emitted when the user confirms they want to exit the entire application.
+    exit_requested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -38,6 +40,7 @@ class MainWindow(QMainWindow):
         self.user = None
         self.user_settings = None
         self._closing_for_logout = False
+        self._closing_for_exit = False
 
         # ---------- Fixed vertical header (always top) ----------
         header = self._build_header_widget()
@@ -477,6 +480,21 @@ class MainWindow(QMainWindow):
             self._closing_for_logout = False
             return
 
-        event.ignore()
-        self._closing_for_logout = True
-        self.do_logout()
+        if self._closing_for_exit:
+            super().closeEvent(event)
+            self._closing_for_exit = False
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Exit NexaCore ERP",
+            "Are you sure you want to exit the application?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self._closing_for_exit = True
+            self.exit_requested.emit()
+            super().close()
+        else:
+            event.ignore()

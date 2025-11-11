@@ -97,10 +97,11 @@ def run_app():
     app.setOrganizationDomain("nexacore.local")
 
     # Login loop: close main window on logout, return to login dialog only
-    while True:
+    should_quit = False
+    while not should_quit:
         user = _login_once(parent=None)
         if not user:
-            sys.exit(0)
+            break
 
         set_current_user(user)
         win = MainWindow()
@@ -112,10 +113,24 @@ def run_app():
             except Exception:
                 pass
 
+        def _on_exit():
+            nonlocal should_quit
+            should_quit = True
+            try:
+                app.quit()
+            except Exception:
+                pass
+            try:
+                win.close()
+            except Exception:
+                pass
+
         win.logout_requested.connect(_on_logout)
+        win.exit_requested.connect(_on_exit)
         win.showMaximized()
 
         # Enter event loop until window closes (logout), then loop to login again
         app.exec()
         set_current_user(None)
         # continue -> back to login dialog only
+    sys.exit(0)
