@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from ....core.database import get_employee_session as SessionLocal
 from ....core.tenant import id as tenant_id
+from ....core.events import employee_events
 from ..models import Employee, LeaveDefault, WorkScheduleDay, Holiday, LeaveEntitlement, SalaryHistory
 
 # expose key for main_window
@@ -553,6 +554,8 @@ class LeaveModuleWidget(QWidget):
         # Gate sub-tabs based on permissions. Safe no-op if permissions not wired.
         _gate_subtabs(self, ROOT_MODULE_NAME, MODULE_NAME, SUBMODULES)
 
+        employee_events.employees_changed.connect(self._handle_employees_changed)
+
     MODULE_KEY = "leave_management"
 
     def filter_tabs_by_access(self, allowed_keys: list[str] | set[str]):
@@ -613,6 +616,10 @@ class LeaveModuleWidget(QWidget):
 
     def _refresh_summary(self):
         session = self.session
+        try:
+            session.expire_all()
+        except Exception:
+            pass
         y = int(self.cmb_year.currentText())
         lt = self.cmb_leave_type_sum.currentText() or "Annual"
 
@@ -643,6 +650,14 @@ class LeaveModuleWidget(QWidget):
                 self.tbl_summary.setItem(r, c, it)
 
         self.tbl_summary.resizeColumnsToContents()
+
+    def _handle_employees_changed(self):
+        try:
+            self.session.expire_all()
+        except Exception:
+            pass
+        self._populate_leave_types(self.cmb_leave_type_sum)
+        self._refresh_summary()
 
     def _populate_leave_types(self, combo: QComboBox):
         s = self.session
