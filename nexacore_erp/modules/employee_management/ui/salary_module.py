@@ -1285,12 +1285,16 @@ class SalaryModuleWidget(QWidget):
                 r = grid.rowCount()
                 grid.insertRow(r)
                 row_emps.append(None)
+                header_rows.add(r)
                 _set_row_header(r, label, level=level, bold=True)
                 shade = "#f3f4f6" if level == 0 else "#f9fafb"
                 for c in range(grid.columnCount()):
                     it = QTableWidgetItem("")
                     it.setFlags(Qt.ItemIsEnabled)
                     it.setBackground(QBrush(QColor(shade)))
+                    font = it.font()
+                    font.setBold(True)
+                    it.setFont(font)
                     grid.setItem(r, c, it)
 
             def _add_employee_row(emp: Employee, line_data=None):
