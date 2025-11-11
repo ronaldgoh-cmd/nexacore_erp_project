@@ -8,7 +8,6 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QHBoxLayout,
     QMessageBox,
-    QAbstractItemView,
 )
 from PySide6.QtGui import QPixmap
 from ..core.database import SessionLocal, get_module_db_path, wipe_module_database
@@ -103,7 +102,7 @@ class CompanySettingsDialog(QDialog):
         v.addWidget(info_lbl)
 
         lw = QListWidget()
-        lw.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
+        lw.setSelectionMode(lw.MultiSelection)
         for label, key, path in module_entries:
             item = QListWidgetItem(label, lw)
             item.setData(Qt.UserRole, {"key": key, "path": path})
