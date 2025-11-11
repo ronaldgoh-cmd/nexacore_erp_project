@@ -209,6 +209,7 @@ def _voucher_html(
 
     advance = float(getattr(emp, "advance", 0.0) or 0.0)
     shg = float(getattr(emp, "shg", 0.0) or 0.0)
+    adjustment = 0.0
 
     cpf_emp = float(getattr(emp, "cpf_employee", 0.0) or 0.0)
     cpf_er = float(getattr(emp, "cpf_employer", 0.0) or 0.0)
@@ -232,12 +233,14 @@ def _voucher_html(
         sdl = float(line.get("sdl", sdl) or 0.0)
         cpf_emp = float(line.get("cpf_emp", cpf_emp) or 0.0)
         cpf_er = float(line.get("cpf_er", cpf_er) or 0.0)
+        adjustment = float(line.get("adjustment", adjustment) or 0.0)
 
     pt_amt = pt_rate * pt_hrs
     ot_amt = ot_rate * ot_hrs
     cpf_total = cpf_emp + cpf_er
 
-    gross = basic + comm + incent + allow + pt_amt + ot_amt
+    gross_base = basic + comm + incent + allow + pt_amt + ot_amt
+    gross = gross_base + adjustment
     ded_only = advance + shg
     net_pay = gross - ded_only - cpf_emp
 
@@ -251,7 +254,7 @@ def _voucher_html(
             return "0.00"
 
     show_warn = (line is None) and (
-                gross == 0 and ded_only == 0 and cpf_emp == 0 and cpf_er == 0 and sdl == 0 and levy == 0)
+                gross == 0 and adjustment == 0 and ded_only == 0 and cpf_emp == 0 and cpf_er == 0 and sdl == 0 and levy == 0)
 
     return f"""<!doctype html>
 <html>
@@ -334,6 +337,7 @@ def _voucher_html(
                 <tr><td class="cell" style="color:#374151">Allowance</td><td class="cell" style="text-align:right">{money(allow)}</td></tr>
                 <tr><td class="cell" style="color:#374151">Part time (Rate × Hr)</td><td class="cell" style="text-align:right">{money(pt_amt)}</td></tr>
                 <tr><td class="cell" style="color:#374151">Overtime (Rate × Hr)</td><td class="cell" style="text-align:right">{money(ot_amt)}</td></tr>
+                <tr><td class="cell" style="color:#374151">Adjustment (+/-)</td><td class="cell" style="text-align:right">{money(adjustment)}</td></tr>
                 <tr><td class="cell" style="font-weight:bold">Gross Pay</td><td class="cell" style="text-align:right;font-weight:bold">{money(gross)}</td></tr>
               </table>
             </td></tr>
@@ -906,6 +910,7 @@ class SalaryModuleWidget(QWidget):
                                    overtime_hours  REAL    DEFAULT 0,
                                    part_time_rate  REAL    DEFAULT 0,
                                    part_time_hours REAL    DEFAULT 0,
+                                   adjustment      REAL    DEFAULT 0,
                                    levy            REAL    DEFAULT 0,
                                    advance         REAL    DEFAULT 0,
                                    shg             REAL    DEFAULT 0,
@@ -923,6 +928,8 @@ class SalaryModuleWidget(QWidget):
                 try:
                     cols = s.execute(_t("PRAGMA table_info(payroll_batch_lines)")).fetchall()
                     have = {c.name for c in cols}
+                    if "adjustment" not in have:
+                        s.execute(_t("ALTER TABLE payroll_batch_lines ADD COLUMN adjustment REAL DEFAULT 0;"))
                     if "advance" not in have:
                         s.execute(_t("ALTER TABLE payroll_batch_lines ADD COLUMN advance REAL DEFAULT 0;"))
                     if "remarks" not in have:
@@ -1107,13 +1114,13 @@ class SalaryModuleWidget(QWidget):
         COLS = [
             "Name", "Basic", "Commission", "Incentives", "Allowance",
             "OT Rate", "OT Hours", "PT Rate", "PT Hours",
-            "Total", "Levy", "Advance", "SHG", "SDL",
+            "Adjustment (+/-)", "Total", "Levy", "Advance", "SHG", "SDL",
             "CPF EE", "CPF ER", "CPF Total",
             "EE Contrib", "ER Contrib", "Cash Payout", "Remarks"
         ]
         REMARKS_COL = COLS.index("Remarks")
         # Editable only these
-        EDITABLE = {1, 2, 3, 4, 5, 6, 7, 8, 10, 11, REMARKS_COL}
+        EDITABLE = {1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, REMARKS_COL}
         from PySide6.QtGui import QColor, QBrush
         TEXT_COLS = {REMARKS_COL}
         DERIVED = set(range(len(COLS))) - (EDITABLE | {0})
@@ -1123,10 +1130,12 @@ class SalaryModuleWidget(QWidget):
             f = lambda c: _rf(t.item(row_idx, c).text()) if t.item(row_idx, c) else 0.0
             basic, com, inc, allw = f(1), f(2), f(3), f(4)
             ot_r, ot_h, pt_r, pt_h = f(5), f(6), f(7), f(8)
-            levy = f(10)
-            adv = f(11)
+            adj = f(9)
+            levy = f(11)
+            adv = f(12)
 
             gross = basic + com + inc + allw + (ot_r * ot_h) + (pt_r * pt_h)
+            total = gross + adj
             # rules at last day of period
             from datetime import date as _date
             from calendar import monthrange
@@ -1146,7 +1155,7 @@ class SalaryModuleWidget(QWidget):
                 ee, er, cpf_t = _cpf_for(emp_obj, gross, on_date)
             ee_c = ee + shg
             er_c = er + sdl + levy
-            cash = gross - ee - shg - adv
+            cash = total - ee - shg - adv
 
             def setv(c, val):
                 it = QTableWidgetItem(_fmt_cell(c, float(val)))
@@ -1156,15 +1165,15 @@ class SalaryModuleWidget(QWidget):
                     it.setForeground(QBrush(DERIVED_COLOR))
                 t.setItem(row_idx, c, it)
 
-            setv(9, gross)
-            setv(12, shg)
-            setv(13, sdl)
-            setv(14, ee)
-            setv(15, er)
-            setv(16, cpf_t)
-            setv(17, ee_c)
-            setv(18, er_c)
-            setv(19, cash)
+            setv(10, total)
+            setv(13, shg)
+            setv(14, sdl)
+            setv(15, ee)
+            setv(16, er)
+            setv(17, cpf_t)
+            setv(18, ee_c)
+            setv(19, er_c)
+            setv(20, cash)
 
         def _recalc_totals(t):
             sums = [0.0] * t.columnCount()
@@ -1178,8 +1187,8 @@ class SalaryModuleWidget(QWidget):
                         pass
             return {
                 "total_basic": sums[1],
-                "total_er": sums[18],
-                "grand_total": sums[19] + sums[18]
+                "total_er": sums[19],
+                "grand_total": sums[20] + sums[19]
             }
 
         def _open_batch_dialog(batch_id=None, read_only=False, y=None, m=None):
@@ -1250,6 +1259,8 @@ class SalaryModuleWidget(QWidget):
                                                   l.overtime_hours,
                                                   l.part_time_rate,
                                                   l.part_time_hours,
+                                                  l.adjustment,
+                                                  l.line_total,
                                                   l.levy,
                                                   l.advance,
                                                   l.shg,
@@ -1310,17 +1321,22 @@ class SalaryModuleWidget(QWidget):
 
                     gross = (ln.basic_salary + ln.commission + ln.incentives + ln.allowance +
                              (ln.overtime_rate * ln.overtime_hours) + (ln.part_time_rate * ln.part_time_hours))
-                    putnum(9, gross, False)
-                    putnum(10, ln.levy, True)
-                    putnum(11, ln.advance, True)
-                    putnum(12, ln.shg, False)
-                    putnum(13, ln.sdl, False)
-                    putnum(14, ln.cpf_emp, False)
-                    putnum(15, ln.cpf_er, False)
-                    putnum(16, ln.cpf_total, False)
-                    putnum(17, ln.ee_contrib, False)
-                    putnum(18, ln.er_contrib, False)
-                    putnum(19, ln.total_cash, False)
+                    adj_val = getattr(ln, "adjustment", 0.0)
+                    line_total = getattr(ln, "line_total", None)
+                    if line_total is None:
+                        line_total = gross + adj_val
+                    putnum(9, adj_val, True)
+                    putnum(10, line_total, False)
+                    putnum(11, ln.levy, True)
+                    putnum(12, ln.advance, True)
+                    putnum(13, ln.shg, False)
+                    putnum(14, ln.sdl, False)
+                    putnum(15, ln.cpf_emp, False)
+                    putnum(16, ln.cpf_er, False)
+                    putnum(17, ln.cpf_total, False)
+                    putnum(18, ln.ee_contrib, False)
+                    putnum(19, ln.er_contrib, False)
+                    putnum(20, ln.total_cash, False)
                     puttext(REMARKS_COL, getattr(ln, "remarks", ""), True)
 
                     with SessionLocal() as s:
@@ -1390,11 +1406,12 @@ class SalaryModuleWidget(QWidget):
                     putnum(6, 0.0, True)  # OT Hours
                     putnum(7, getattr(e, "parttime_rate", getattr(e, "part_time_rate", 0.0)), True)
                     putnum(8, 0.0, True)  # PT Hours
-                    putnum(10, getattr(e, "levy", 0.0), True)
-                    putnum(11, getattr(e, "advance", 0.0), True)
+                    putnum(9, 0.0, True)  # Adjustment (+/-)
+                    putnum(11, getattr(e, "levy", 0.0), True)
+                    putnum(12, getattr(e, "advance", 0.0), True)
 
                     # derived placeholders
-                    for c in (9, 12, 13, 14, 15, 16, 17, 18, 19):
+                    for c in (10, 13, 14, 15, 16, 17, 18, 19, 20):
                         it = QTableWidgetItem(_fmt_cell(c, 0.0))
                         it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
                         it.setFlags(it.flags() & ~Qt.ItemIsEditable)
@@ -1466,33 +1483,35 @@ class SalaryModuleWidget(QWidget):
                         ot_h = _rf(_txt(6))
                         pt_r = _rf(_txt(7))
                         pt_h = _rf(_txt(8))
-                        tot = _rf(_txt(9))
-                        levy = _rf(_txt(10))
-                        adv = _rf(_txt(11))
-                        shg = _rf(_txt(12))
-                        sdl = _rf(_txt(13))
-                        cpf_ee = _rf(_txt(14))
-                        cpf_er = _rf(_txt(15))
-                        cpf_t = _rf(_txt(16))
-                        ee_c = _rf(_txt(17))
-                        er_c = _rf(_txt(18))
-                        cash = _rf(_txt(19))
+                        adj = _rf(_txt(9))
+                        tot = _rf(_txt(10))
+                        levy = _rf(_txt(11))
+                        adv = _rf(_txt(12))
+                        shg = _rf(_txt(13))
+                        sdl = _rf(_txt(14))
+                        cpf_ee = _rf(_txt(15))
+                        cpf_er = _rf(_txt(16))
+                        cpf_t = _rf(_txt(17))
+                        ee_c = _rf(_txt(18))
+                        er_c = _rf(_txt(19))
+                        cash = _rf(_txt(20))
                         remarks_val = _txt(REMARKS_COL).strip()
                         s.execute(text("""
                                        INSERT INTO payroll_batch_lines(batch_id, employee_id, basic_salary, commission,
                                                                        incentives, allowance,
                                                                        overtime_rate, overtime_hours, part_time_rate,
-                                                                       part_time_hours,
+                                                                       part_time_hours, adjustment,
                                                                        levy, advance, shg, sdl, cpf_emp, cpf_er,
                                                                        cpf_total,
                                                                        line_total, ee_contrib, er_contrib, total_cash,
                                                                        remarks)
-                                       VALUES (:b, :e, :ba, :co, :in, :al, :otr, :oth, :ptr, :pth, :lev, :adv, :shg, :sdl,
-                                               :ee, :er, :cpt, :lt, :eec, :erc, :cash, :rmk)
+                                       VALUES (:b, :e, :ba, :co, :in, :al, :otr, :oth, :ptr, :pth, :adj, :lev, :adv, :shg,
+                                               :sdl, :ee, :er, :cpt, :lt, :eec, :erc, :cash, :rmk)
                                        """), {
                             "b": batch_id_local, "e": int(emp.id),
                             "ba": basic, "co": comm, "in": inc, "al": allw,
                             "otr": ot_r, "oth": ot_h, "ptr": pt_r, "pth": pt_h,
+                            "adj": adj,
                             "lev": levy, "adv": adv, "shg": shg, "sdl": sdl,
                             "ee": cpf_ee, "er": cpf_er, "cpt": cpf_t,
                             "lt": tot, "eec": ee_c, "erc": er_c, "cash": cash,
@@ -1661,6 +1680,7 @@ class SalaryModuleWidget(QWidget):
                                                overtime_hours,
                                                part_time_rate,
                                                part_time_hours,
+                                               adjustment,
                                                levy,
                                                advance,
                                                shg,
@@ -1685,6 +1705,7 @@ class SalaryModuleWidget(QWidget):
                             "overtime_hours": float(ln.overtime_hours or 0.0),
                             "part_time_rate": float(ln.part_time_rate or 0.0),
                             "part_time_hours": float(ln.part_time_hours or 0.0),
+                            "adjustment": float(ln.adjustment or 0.0),
                             "levy": float(ln.levy or 0.0),
                             "advance": float(ln.advance or 0.0),
                             "shg": float(ln.shg or 0.0),
