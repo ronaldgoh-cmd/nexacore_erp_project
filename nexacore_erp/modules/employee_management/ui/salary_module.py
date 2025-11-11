@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import csv
 from calendar import month_name
 from datetime import date, datetime
 from typing import List, Tuple, Optional
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import (
 from ....core.database import get_employee_session as SessionLocal, get_main_session as MainSession
 from ....core.tenant import id as tenant_id
 from ....core.events import employee_events
-from ..models import Employee
+from ..models import Employee, DropdownOption
 from ....core.models import CompanySettings
 
 # -------- Roles & Access manifest --------
@@ -94,6 +95,20 @@ def _save_voucher_format_to_db(fmt: str) -> None:
             s.commit()
     except Exception:
         pass
+
+
+def _dropdown_values(category: str) -> list[str]:
+    """Return dropdown values (trimmed) for a category from Employee settings."""
+    try:
+        with SessionLocal() as s:
+            rows = (s.query(DropdownOption.value)
+                    .filter(DropdownOption.account_id == tenant_id(),
+                            DropdownOption.category == category)
+                    .order_by(DropdownOption.value)
+                    .all())
+        return [str(r[0]).strip() for r in rows if (r[0] or "").strip()]
+    except Exception:
+        return []
 
 
 def _format_voucher_code(emp: Employee | None, year: int, month_index_1: int) -> str:
@@ -1127,6 +1142,8 @@ class SalaryModuleWidget(QWidget):
         DERIVED_COLOR = QColor("#7a1f1f")  # dark red for uneditable fields
 
         def _recalc_row(t, row_idx, emp_obj, on_date, name_list=None):
+            if emp_obj is None:
+                return
             f = lambda c: _rf(t.item(row_idx, c).text()) if t.item(row_idx, c) else 0.0
             basic, com, inc, allw = f(1), f(2), f(3), f(4)
             ot_r, ot_h, pt_r, pt_h = f(5), f(6), f(7), f(8)
@@ -1178,6 +1195,8 @@ class SalaryModuleWidget(QWidget):
         def _recalc_totals(t):
             sums = [0.0] * t.columnCount()
             for r in range(t.rowCount()):
+                if r >= len(row_emps) or row_emps[r] is None:
+                    continue
                 for c in range(t.columnCount()):
                     if c in TEXT_COLS:
                         continue
@@ -1241,10 +1260,163 @@ class SalaryModuleWidget(QWidget):
             on_date = _date(y, m, monthrange(y, m)[1])
             row_emps = []
 
-            def _set_row_header(r, name):
-                hi = QTableWidgetItem((name or "").strip())
+            def _set_row_header(r, name, *, level: int = 0, bold: bool = False):
+                text = f"{'    ' * level}{(name or '').strip()}"
+                hi = QTableWidgetItem(text)
                 hi.setToolTip((name or "").strip())
+                if bold:
+                    font = hi.font()
+                    font.setBold(True)
+                    hi.setFont(font)
                 grid.setVerticalHeaderItem(r, hi)
+
+            def _add_group_header(label: str, level: int):
+                r = grid.rowCount()
+                grid.insertRow(r)
+                row_emps.append(None)
+                _set_row_header(r, label, level=level, bold=True)
+                shade = "#f3f4f6" if level == 0 else "#f9fafb"
+                for c in range(grid.columnCount()):
+                    it = QTableWidgetItem("")
+                    it.setFlags(Qt.ItemIsEnabled)
+                    it.setBackground(QBrush(QColor(shade)))
+                    grid.setItem(r, c, it)
+
+            def _add_employee_row(emp: Employee, line_data=None):
+                r = grid.rowCount()
+                grid.insertRow(r)
+
+                it_name = QTableWidgetItem(emp.full_name or "")
+                it_name.setFlags(it_name.flags() & ~Qt.ItemIsEditable)
+                grid.setItem(r, 0, it_name)
+                _set_row_header(r, emp.full_name or "", level=2)
+
+                def putnum(c, v, editable):
+                    txt = _fmt_cell(c, float(v)) if v is not None else ""
+                    it = QTableWidgetItem(txt)
+                    if c != 0:
+                        it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+                    flags = it.flags()
+                    if editable and (not read_only):
+                        it.setFlags(flags | Qt.ItemIsEditable)
+                    else:
+                        it.setFlags(flags & ~Qt.ItemIsEditable)
+                        if c in DERIVED:
+                            it.setForeground(QBrush(DERIVED_COLOR))
+                    grid.setItem(r, c, it)
+
+                def puttext(c, v, editable):
+                    it = QTableWidgetItem(str(v or ""))
+                    it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                    flags = it.flags()
+                    if editable and (not read_only):
+                        it.setFlags(flags | Qt.ItemIsEditable)
+                    else:
+                        it.setFlags(flags & ~Qt.ItemIsEditable)
+                    grid.setItem(r, c, it)
+
+                if line_data is not None:
+                    putnum(1, line_data.basic_salary, True)
+                    putnum(2, line_data.commission, True)
+                    putnum(3, line_data.incentives, True)
+                    putnum(4, line_data.allowance, True)
+                    putnum(5, line_data.overtime_rate, True)
+                    putnum(6, line_data.overtime_hours, True)
+                    putnum(7, line_data.part_time_rate, True)
+                    putnum(8, line_data.part_time_hours, True)
+
+                    gross = (line_data.basic_salary + line_data.commission + line_data.incentives + line_data.allowance +
+                             (line_data.overtime_rate * line_data.overtime_hours) +
+                             (line_data.part_time_rate * line_data.part_time_hours))
+                    adj_val = getattr(line_data, "adjustment", 0.0)
+                    line_total = getattr(line_data, "line_total", None)
+                    if line_total is None:
+                        line_total = gross + adj_val
+                    putnum(9, adj_val, True)
+                    putnum(10, line_total, False)
+                    putnum(11, line_data.levy, True)
+                    putnum(12, line_data.advance, True)
+                    putnum(13, line_data.shg, False)
+                    putnum(14, line_data.sdl, False)
+                    putnum(15, line_data.cpf_emp, False)
+                    putnum(16, line_data.cpf_er, False)
+                    putnum(17, line_data.cpf_total, False)
+                    putnum(18, line_data.ee_contrib, False)
+                    putnum(19, line_data.er_contrib, False)
+                    putnum(20, line_data.total_cash, False)
+                    puttext(REMARKS_COL, getattr(line_data, "remarks", ""), True)
+                else:
+                    putnum(1, getattr(emp, "basic_salary", 0.0), True)
+                    putnum(2, 0.0, True)
+                    putnum(3, getattr(emp, "incentives", 0.0), True)
+                    putnum(4, getattr(emp, "allowance", 0.0), True)
+                    putnum(5, getattr(emp, "overtime_rate", 0.0), True)
+                    putnum(6, 0.0, True)
+                    putnum(7, getattr(emp, "parttime_rate", getattr(emp, "part_time_rate", 0.0)), True)
+                    putnum(8, 0.0, True)
+                    putnum(9, 0.0, True)
+                    putnum(10, 0.0, False)
+                    putnum(11, getattr(emp, "levy", 0.0), True)
+                    putnum(12, getattr(emp, "advance", 0.0), True)
+                    putnum(13, 0.0, False)
+                    putnum(14, 0.0, False)
+                    putnum(15, 0.0, False)
+                    putnum(16, 0.0, False)
+                    putnum(17, 0.0, False)
+                    putnum(18, 0.0, False)
+                    putnum(19, 0.0, False)
+                    putnum(20, 0.0, False)
+
+                    remark_it = QTableWidgetItem("")
+                    remark_it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                    if not read_only:
+                        remark_it.setFlags(remark_it.flags() | Qt.ItemIsEditable)
+                    else:
+                        remark_it.setFlags(remark_it.flags() & ~Qt.ItemIsEditable)
+                    grid.setItem(r, REMARKS_COL, remark_it)
+
+                row_emps.append(emp)
+
+            type_options = _dropdown_values("Employment Type")
+            dept_options = _dropdown_values("Department")
+            type_index_map = {opt.casefold(): idx for idx, opt in enumerate(type_options) if opt.strip()}
+            type_label_map = {opt.casefold(): opt.strip() for opt in type_options if opt.strip()}
+            dept_index_map = {opt.casefold(): idx for idx, opt in enumerate(dept_options) if opt.strip()}
+            dept_label_map = {opt.casefold(): opt.strip() for opt in dept_options if opt.strip()}
+
+            UNASSIGNED_TYPE = "Unassigned Employment Type"
+            UNASSIGNED_DEPT = "Unassigned Department"
+
+            def _classify(emp: Employee):
+                raw_type = (getattr(emp, "employment_type", "") or "").strip()
+                if raw_type:
+                    key = raw_type.casefold()
+                    if key in type_index_map:
+                        type_order = (0, type_index_map[key])
+                        type_label = type_label_map[key]
+                    else:
+                        type_order = (1, raw_type.lower())
+                        type_label = raw_type
+                else:
+                    type_order = (2, "")
+                    type_label = UNASSIGNED_TYPE
+
+                raw_dept = (getattr(emp, "department", "") or "").strip()
+                if raw_dept:
+                    dkey = raw_dept.casefold()
+                    if dkey in dept_index_map:
+                        dept_order = (0, dept_index_map[dkey])
+                        dept_label = dept_label_map[dkey]
+                    else:
+                        dept_order = (1, raw_dept.lower())
+                        dept_label = raw_dept
+                else:
+                    dept_order = (2, "")
+                    dept_label = UNASSIGNED_DEPT
+
+                return type_order, type_label, dept_order, dept_label
+
+            entries = []
 
             if batch_id:
                 with SessionLocal() as s:
@@ -1275,72 +1447,21 @@ class SalaryModuleWidget(QWidget):
                                            FROM payroll_batch_lines l
                                                     JOIN employees e ON e.id = l.employee_id
                                            WHERE l.batch_id = :b
-                                           ORDER BY e.full_name COLLATE NOCASE ASC
                                            """), {"b": batch_id}).fetchall()
-                for ln in lines:
-                    r = grid.rowCount()
-                    grid.insertRow(r)
-
-                    # Keep name in hidden col 0 for reference
-                    it_name = QTableWidgetItem(ln.full_name or "")
-                    it_name.setFlags(it_name.flags() & ~Qt.ItemIsEditable)
-                    grid.setItem(r, 0, it_name)
-                    _set_row_header(r, ln.full_name or "")
-
-                    def putnum(c, v, editable):
-                        it = QTableWidgetItem(_fmt_cell(c, float(v)))
-                        it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
-                        flags = it.flags()
-                        if editable and (not read_only):
-                            it.setFlags(flags | Qt.ItemIsEditable)
-                        else:
-                            it.setFlags(flags & ~Qt.ItemIsEditable)
-                            if c in DERIVED:
-                                from PySide6.QtGui import QBrush
-                                it.setForeground(QBrush(DERIVED_COLOR))
-                        grid.setItem(r, c, it)
-
-                    def puttext(c, v, editable):
-                        it = QTableWidgetItem(str(v or ""))
-                        it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                        flags = it.flags()
-                        if editable and (not read_only):
-                            it.setFlags(flags | Qt.ItemIsEditable)
-                        else:
-                            it.setFlags(flags & ~Qt.ItemIsEditable)
-                        grid.setItem(r, c, it)
-
-                    putnum(1, ln.basic_salary, True)
-                    putnum(2, ln.commission, True)
-                    putnum(3, ln.incentives, True)
-                    putnum(4, ln.allowance, True)
-                    putnum(5, ln.overtime_rate, True)
-                    putnum(6, ln.overtime_hours, True)
-                    putnum(7, ln.part_time_rate, True)
-                    putnum(8, ln.part_time_hours, True)
-
-                    gross = (ln.basic_salary + ln.commission + ln.incentives + ln.allowance +
-                             (ln.overtime_rate * ln.overtime_hours) + (ln.part_time_rate * ln.part_time_hours))
-                    adj_val = getattr(ln, "adjustment", 0.0)
-                    line_total = getattr(ln, "line_total", None)
-                    if line_total is None:
-                        line_total = gross + adj_val
-                    putnum(9, adj_val, True)
-                    putnum(10, line_total, False)
-                    putnum(11, ln.levy, True)
-                    putnum(12, ln.advance, True)
-                    putnum(13, ln.shg, False)
-                    putnum(14, ln.sdl, False)
-                    putnum(15, ln.cpf_emp, False)
-                    putnum(16, ln.cpf_er, False)
-                    putnum(17, ln.cpf_total, False)
-                    putnum(18, ln.ee_contrib, False)
-                    putnum(19, ln.er_contrib, False)
-                    putnum(20, ln.total_cash, False)
-                    puttext(REMARKS_COL, getattr(ln, "remarks", ""), True)
-
-                    with SessionLocal() as s:
-                        row_emps.append(s.get(Employee, int(ln.employee_id)))
+                    for ln in lines:
+                        emp_obj = s.get(Employee, int(ln.employee_id))
+                        if not emp_obj:
+                            continue
+                        type_order, type_label, dept_order, dept_label = _classify(emp_obj)
+                        entries.append({
+                            "emp": emp_obj,
+                            "line": ln,
+                            "type_order": type_order,
+                            "type_label": type_label,
+                            "dept_order": dept_order,
+                            "dept_label": dept_label,
+                            "name_key": ((emp_obj.full_name or "").strip().lower())
+                        })
             else:
                 def _active_employees(y, m):
                     from calendar import monthrange
@@ -1374,60 +1495,30 @@ class SalaryModuleWidget(QWidget):
                     return rows
 
                 emps = _active_employees(y, m)
-                emps.sort(key=lambda e: (e.full_name or "").lower())
                 for e in emps:
-                    r = grid.rowCount()
-                    grid.insertRow(r)
+                    type_order, type_label, dept_order, dept_label = _classify(e)
+                    entries.append({
+                        "emp": e,
+                        "line": None,
+                        "type_order": type_order,
+                        "type_label": type_label,
+                        "dept_order": dept_order,
+                        "dept_label": dept_label,
+                        "name_key": ((e.full_name or "").strip().lower())
+                    })
 
-                    it_name = QTableWidgetItem(e.full_name or "")
-                    it_name.setFlags(it_name.flags() & ~Qt.ItemIsEditable)
-                    grid.setItem(r, 0, it_name)
-                    _set_row_header(r, e.full_name or "")
+            entries.sort(key=lambda row: (row["type_order"], row["dept_order"], row["name_key"]))
 
-                    def putnum(c, v, editable):
-                        it = QTableWidgetItem(_fmt_cell(c, float(v)) if c != 0 else "")
-                        if c != 0:
-                            it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
-                        flags = it.flags()
-                        if editable:
-                            it.setFlags(flags | Qt.ItemIsEditable)
-                        else:
-                            it.setFlags(flags & ~Qt.ItemIsEditable)
-                            if c in DERIVED:
-                                from PySide6.QtGui import QBrush
-                                it.setForeground(QBrush(DERIVED_COLOR))
-                        grid.setItem(r, c, it)
-
-                    putnum(1, getattr(e, "basic_salary", 0.0), True)
-                    putnum(2, 0.0, True)
-                    putnum(3, getattr(e, "incentives", 0.0), True)
-                    putnum(4, getattr(e, "allowance", 0.0), True)
-                    putnum(5, getattr(e, "overtime_rate", 0.0), True)
-                    putnum(6, 0.0, True)  # OT Hours
-                    putnum(7, getattr(e, "parttime_rate", getattr(e, "part_time_rate", 0.0)), True)
-                    putnum(8, 0.0, True)  # PT Hours
-                    putnum(9, 0.0, True)  # Adjustment (+/-)
-                    putnum(11, getattr(e, "levy", 0.0), True)
-                    putnum(12, getattr(e, "advance", 0.0), True)
-
-                    # derived placeholders
-                    for c in (10, 13, 14, 15, 16, 17, 18, 19, 20):
-                        it = QTableWidgetItem(_fmt_cell(c, 0.0))
-                        it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
-                        it.setFlags(it.flags() & ~Qt.ItemIsEditable)
-                        from PySide6.QtGui import QBrush
-                        it.setForeground(QBrush(DERIVED_COLOR))
-                        grid.setItem(r, c, it)
-
-                    remark_it = QTableWidgetItem("")
-                    remark_it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                    if not read_only:
-                        remark_it.setFlags(remark_it.flags() | Qt.ItemIsEditable)
-                    else:
-                        remark_it.setFlags(remark_it.flags() & ~Qt.ItemIsEditable)
-                    grid.setItem(r, REMARKS_COL, remark_it)
-
-                    row_emps.append(e)
+            current_type = current_dept = None
+            for entry in entries:
+                if entry["type_label"] != current_type:
+                    _add_group_header(entry["type_label"], level=0)
+                    current_type = entry["type_label"]
+                    current_dept = None
+                if entry["dept_label"] != current_dept:
+                    _add_group_header(entry["dept_label"], level=1)
+                    current_dept = entry["dept_label"]
+                _add_employee_row(entry["emp"], entry["line"])
 
             # initial compute
             for r, e in enumerate(row_emps):
@@ -1435,6 +1526,8 @@ class SalaryModuleWidget(QWidget):
 
             if not read_only:
                 def _cell_changed(r, c):
+                    if r >= len(row_emps) or row_emps[r] is None:
+                        return
                     if c not in EDITABLE or c in TEXT_COLS:
                         return
                     _recalc_row(grid, r, row_emps[r], on_date)
@@ -1448,7 +1541,30 @@ class SalaryModuleWidget(QWidget):
                 btns.addButton("Save", QDialogButtonBox.AcceptRole)
                 btns.addButton("Submit", QDialogButtonBox.ActionRole)
                 btns.addButton(QDialogButtonBox.Close)
+            export_btn = btns.addButton("Export CSV", QDialogButtonBox.ActionRole)
             lay.addWidget(btns)
+
+            def _export_csv():
+                default_name = f"Salary_Review_{month_name[m]}_{y}.csv"
+                path, _ = QFileDialog.getSaveFileName(dlg, "Export Salary Review", default_name, "CSV Files (*.csv)")
+                if not path:
+                    return
+                try:
+                    with open(path, "w", newline="", encoding="utf-8") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(COLS)
+                        for r, emp_obj in enumerate(row_emps):
+                            if emp_obj is None:
+                                continue
+                            writer.writerow([
+                                (grid.item(r, c).text() if grid.item(r, c) else "")
+                                for c in range(grid.columnCount())
+                            ])
+                    QMessageBox.information(dlg, "Export", f"Exported to {path}")
+                except Exception as exc:
+                    QMessageBox.warning(dlg, "Export", f"Failed to export.\n{exc}")
+
+            export_btn.clicked.connect(_export_csv)
 
             def _persist(status=None):
                 totals = _recalc_totals(grid)
@@ -1470,7 +1586,11 @@ class SalaryModuleWidget(QWidget):
                         s.execute(text("DELETE FROM payroll_batch_lines WHERE batch_id=:i"), {"i": batch_id_local})
 
                     for r in range(grid.rowCount()):
+                        if r >= len(row_emps):
+                            continue
                         emp = row_emps[r]
+                        if emp is None:
+                            continue
                         def _txt(col):
                             it = grid.item(r, col)
                             return it.text() if it else ""
