@@ -737,11 +737,14 @@ class SalaryModuleWidget(QWidget):
 
             rows = _cpf_rows()
             for age_value in age_candidates:
-                for (
+                best_row = None
+                best_key = None
+
+                for idx, (
                         age_br, resid_row, pr_year, sal_lo, sal_hi,
                         tot_pct_tw, tot_pct_tw_m, ee_pct_tw, ee_pct_tw_m,
                         cap_total, cap_ee, eff_from
-                ) in rows:
+                ) in enumerate(rows):
 
                     if resid_row.strip().lower() != resid_emp:
                         continue
@@ -757,25 +760,41 @@ class SalaryModuleWidget(QWidget):
                         if pry is None or pry != pr_year:
                             continue
 
-                    off = _CPF_TW_MINUS_OFFSET
+                    eff_key = eff_from or date.min
+                    sal_lo_val = sal_lo or 0.0
+                    sal_hi_val = sal_hi if sal_hi else float("inf")
+                    key = (eff_key, sal_lo_val, -sal_hi_val, -idx)
 
-                    total_term1 = tw * (tot_pct_tw / 100.0)
-                    total_term2 = max(tw - off, 0.0) * (tot_pct_tw_m / 100.0)
-                    ee_term1 = tw * (ee_pct_tw / 100.0)
-                    ee_term2 = max(tw - off, 0.0) * (ee_pct_tw_m / 100.0)
+                    if best_key is None or key > best_key:
+                        best_key = key
+                        best_row = (
+                            tot_pct_tw, tot_pct_tw_m, ee_pct_tw, ee_pct_tw_m,
+                            cap_total, cap_ee
+                        )
 
-                    total_raw = total_term1 + total_term2
-                    ee_raw = ee_term1 + ee_term2
+                if best_row is None:
+                    continue
 
-                    if cap_total:
-                        total_raw = min(total_raw, cap_total)
-                    if cap_ee:
-                        ee_raw = min(ee_raw, cap_ee)
+                tot_pct_tw, tot_pct_tw_m, ee_pct_tw, ee_pct_tw_m, cap_total, cap_ee = best_row
+                off = _CPF_TW_MINUS_OFFSET
 
-                    total_val = _round_dollar_half_up(total_raw)
-                    ee_val = _floor_dollar(ee_raw)
-                    er_val = float(max(total_val - ee_val, 0.0))
-                    return ee_val, er_val, float(ee_val + er_val)
+                total_term1 = tw * (tot_pct_tw / 100.0)
+                total_term2 = max(tw - off, 0.0) * (tot_pct_tw_m / 100.0)
+                ee_term1 = tw * (ee_pct_tw / 100.0)
+                ee_term2 = max(tw - off, 0.0) * (ee_pct_tw_m / 100.0)
+
+                total_raw = total_term1 + total_term2
+                ee_raw = ee_term1 + ee_term2
+
+                if cap_total:
+                    total_raw = min(total_raw, cap_total)
+                if cap_ee:
+                    ee_raw = min(ee_raw, cap_ee)
+
+                total_val = _round_dollar_half_up(total_raw)
+                ee_val = _floor_dollar(ee_raw)
+                er_val = float(max(total_val - ee_val, 0.0))
+                return ee_val, er_val, float(ee_val + er_val)
 
             return 0.0, 0.0, 0.0
 
