@@ -1203,10 +1203,10 @@ class SalaryModuleWidget(QWidget):
             setv(19, er_c)
             setv(20, cash)
 
-        def _recalc_totals(t):
+        def _recalc_totals(t, row_emps_list):
             sums = [0.0] * t.columnCount()
             for r in range(t.rowCount()):
-                if r >= len(row_emps) or row_emps[r] is None:
+                if r >= len(row_emps_list) or row_emps_list[r] is None:
                     continue
                 for c in range(t.columnCount()):
                     if c in TEXT_COLS:
@@ -1578,7 +1578,7 @@ class SalaryModuleWidget(QWidget):
             export_btn.clicked.connect(_export_csv)
 
             def _persist(status=None):
-                totals = _recalc_totals(grid)
+                totals = _recalc_totals(grid, row_emps)
                 from sqlalchemy import text
                 with SessionLocal() as s:
                     if batch_id is None:
