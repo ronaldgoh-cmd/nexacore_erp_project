@@ -973,6 +973,11 @@ class SalaryModuleWidget(QWidget):
             return f"${val_float:,.2f}"
 
         from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem, QStyle
+        header_rows: set[int] = set()
+
+        def _is_header_row(row_idx: int) -> bool:
+            return row_idx in header_rows
+
         class _NoBorderCenterDelegate(QStyledItemDelegate):
             def paint(self, painter, option, index):
                 opt = QStyleOptionViewItem(option)
@@ -981,12 +986,18 @@ class SalaryModuleWidget(QWidget):
                 super().paint(painter, opt, index)
 
         class _BorderedCenterDelegate(QStyledItemDelegate):
+            def __init__(self, header_checker, parent=None):
+                super().__init__(parent)
+                self._header_checker = header_checker
+
             def paint(self, painter, option, index):
                 from PySide6.QtGui import QPainter, QColor, QPen
                 opt = QStyleOptionViewItem(option)
                 opt.displayAlignment = Qt.AlignCenter | Qt.AlignVCenter
                 opt.state &= ~QStyle.State_HasFocus
                 super().paint(painter, opt, index)
+                if self._header_checker(index.row()):
+                    return
                 r = option.rect
                 pen = QPen(QColor("#e5e7eb"))
                 pen.setWidth(1)
@@ -1252,7 +1263,7 @@ class SalaryModuleWidget(QWidget):
 
             # Delegates
             nb = _NoBorderCenterDelegate(grid)
-            bd = _BorderedCenterDelegate(grid)
+            bd = _BorderedCenterDelegate(_is_header_row, grid)
             for c in range(len(COLS)):
                 grid.setItemDelegateForColumn(c, bd if c in EDITABLE else nb)
 
