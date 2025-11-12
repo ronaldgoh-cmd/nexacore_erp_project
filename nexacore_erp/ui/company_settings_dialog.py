@@ -246,6 +246,16 @@ class CompanySettingsDialog(QDialog):
         dialog.exec()
 
     def factory_reset(self):
+        if QMessageBox.warning(
+            self,
+            "Factory Reset",
+            "Please close all open module tabs and widgets before wiping the databases to "
+            "release any active connections. Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+
         module_entries: list[tuple[str, str, str]] = []
         for info, module in discover_modules():
             module_path = getattr(module.__class__, "__module__", "")

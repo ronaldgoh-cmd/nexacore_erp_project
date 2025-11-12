@@ -4,7 +4,7 @@ from pathlib import Path
 from datetime import datetime
 import json
 import shutil
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, MetaData
 from sqlalchemy.pool import NullPool
 from sqlalchemy.orm import sessionmaker, declarative_base
 
@@ -58,6 +58,7 @@ MODULE_DB_FILES = {
 
 _module_engines: dict[str, any] = {}
 _module_sessions: dict[str, sessionmaker] = {}
+_module_metadata: dict[str, MetaData] = {}
 
 def _module_db_path(module_key: str) -> Path:
     filename = MODULE_DB_FILES.get(module_key)
@@ -81,6 +82,9 @@ def get_module_engine(module_key: str):
         _module_engines[module_key] = eng
         with eng.connect() as c:
             c.execute(text("PRAGMA foreign_keys = ON"))
+        metadata = _module_metadata.get(module_key)
+        if metadata is not None:
+            metadata.create_all(bind=eng)
     return eng
 
 def get_module_sessionmaker(module_key: str) -> sessionmaker:
@@ -93,6 +97,7 @@ def get_module_sessionmaker(module_key: str) -> sessionmaker:
 
 def init_module_db(module_key: str, base_metadata) -> None:
     """Create tables for a module's SQLAlchemy Base on its own DB."""
+    _module_metadata[module_key] = base_metadata
     eng = get_module_engine(module_key)
     base_metadata.create_all(bind=eng)
 
