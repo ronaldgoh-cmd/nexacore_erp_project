@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import math
 from calendar import month_name
 from datetime import date, datetime
 from typing import List, Tuple, Optional
@@ -733,10 +734,21 @@ class SalaryModuleWidget(QWidget):
                 return True
             return True
 
-        def _employee_pr_year(emp) -> Optional[int]:
+        def _employee_pr_year(emp, on_date: date) -> Optional[int]:
             val = getattr(emp, "pr_year", None)
             if isinstance(val, int):
                 return val
+            pr_date = getattr(emp, "pr_date", None)
+            if isinstance(pr_date, str):
+                pr_date = _rd(pr_date)
+            elif isinstance(pr_date, datetime):
+                pr_date = pr_date.date()
+            if isinstance(pr_date, date):
+                if pr_date > on_date:
+                    return None
+                elapsed_days = (on_date - pr_date).days
+                years = elapsed_days / 365.0
+                return max(1, math.ceil(years))
             resid = (getattr(emp, "residency", "") or "")
             m = re.search(r"[Yy]\s*(\d+)", resid)
             try:
@@ -752,7 +764,7 @@ class SalaryModuleWidget(QWidget):
                 return 0.0, 0.0, 0.0
             resid_emp = (getattr(emp, "residency", "") or "").strip().lower()
             age_years, has_fraction = _age(emp, on_date)
-            pry = _employee_pr_year(emp)
+            pry = _employee_pr_year(emp, on_date)
 
             age_candidates = []
             if has_fraction and age_years >= 60:
@@ -1613,6 +1625,8 @@ class SalaryModuleWidget(QWidget):
                 btns.addButton(QDialogButtonBox.Close)
             export_btn = btns.addButton("Export CSV", QDialogButtonBox.ActionRole)
             lay.addWidget(btns)
+
+            btns.rejected.connect(dlg.reject)
 
             def _export_csv():
                 default_name = f"Salary_Review_{month_name[m]}_{y}.csv"
