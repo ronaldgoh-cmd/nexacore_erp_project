@@ -1768,6 +1768,12 @@ class SalaryModuleWidget(QWidget):
                     QMessageBox.information(dlg, "Salary Review", "Saved.")
                     _load_batches()
                 elif "submit" in t:
+                    if QMessageBox.question(
+                        dlg,
+                        "Submit Batch",
+                        "Submit and lock this batch?",
+                    ) != QMessageBox.Yes:
+                        return
                     _persist("Submitted")
                     QMessageBox.information(dlg, "Salary Review", "Submitted and locked.")
                     _load_batches()
@@ -1807,6 +1813,12 @@ class SalaryModuleWidget(QWidget):
             from PySide6.QtWidgets import QMessageBox
             if not bid:
                 QMessageBox.information(host, "Salary Review", "Select a batch.")
+                return
+            if QMessageBox.question(
+                host,
+                "Submit Batch",
+                "Submit selected batch? This will lock the batch.",
+            ) != QMessageBox.Yes:
                 return
             from sqlalchemy import text
             with SessionLocal() as s:
