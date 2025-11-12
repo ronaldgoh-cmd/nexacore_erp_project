@@ -1324,6 +1324,10 @@ class SalaryModuleWidget(QWidget):
 
             dlg = QDialog(self)
 
+            # Reset cached header row indexes each time the dialog is opened so
+            # stale values from previous sessions do not affect the new grid.
+            header_rows.clear()
+
             if batch_id:
                 with SessionLocal() as s:
                     b = s.execute(text("SELECT year, month, status FROM payroll_batches WHERE id=:i"),
