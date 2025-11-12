@@ -1,4 +1,4 @@
-from sqlalchemy import String, Integer, LargeBinary, Boolean, DateTime
+from sqlalchemy import String, Integer, LargeBinary, Boolean, DateTime, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from datetime import datetime
 from .database import Base
@@ -55,3 +55,27 @@ class ModuleState(Base):
     account_id: Mapped[str] = mapped_column(String, index=True, default="default")
     name: Mapped[str] = mapped_column(String, index=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class DashboardPreference(Base):
+    __tablename__ = "dashboard_preferences"
+    __table_args__ = (UniqueConstraint("account_id", "user_id", name="uq_dashboard_pref_user"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, index=True, default="default")
+    user_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
+    widgets_json: Mapped[str] = mapped_column(Text, default="[]")
+
+
+class CloudSettings(Base):
+    __tablename__ = "cloud_settings"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, index=True, default="default")
+    provider: Mapped[str] = mapped_column(String, default="digitalocean")
+    region: Mapped[str] = mapped_column(String, default="")
+    spaces_region: Mapped[str] = mapped_column(String, default="")
+    spaces_bucket: Mapped[str] = mapped_column(String, default="")
+    control_panel_url: Mapped[str] = mapped_column(String, default="https://cloud.digitalocean.com")
+    api_endpoint: Mapped[str] = mapped_column(String, default="")
+    api_token: Mapped[str] = mapped_column(String, default="")
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
