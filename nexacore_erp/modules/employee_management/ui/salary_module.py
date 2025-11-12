@@ -755,15 +755,9 @@ class SalaryModuleWidget(QWidget):
             return True
 
         def _employee_pr_year(emp, on_date: date) -> Optional[int]:
-            resid_raw = getattr(emp, "residency", "") or ""
-            resid_norm = _normalize_residency(resid_raw)
-            if not resid_norm.startswith("permanent resident"):
-                return None
-
             val = getattr(emp, "pr_year", None)
             if isinstance(val, int) and val >= 1:
                 return val
-
             pr_date = getattr(emp, "pr_date", None)
             if isinstance(pr_date, str):
                 pr_date = _rd(pr_date)
@@ -772,25 +766,15 @@ class SalaryModuleWidget(QWidget):
             if isinstance(pr_date, date):
                 if pr_date > on_date:
                     return None
-                years_elapsed = on_date.year - pr_date.year
-                try:
-                    anniv = pr_date.replace(year=pr_date.year + years_elapsed)
-                except ValueError:
-                    if pr_date.month == 2 and pr_date.day == 29:
-                        anniv = date(pr_date.year + years_elapsed, 2, 28)
-                    else:
-                        anniv = pr_date.replace(year=pr_date.year + years_elapsed, day=pr_date.day - 1)
-                if on_date < anniv:
-                    years_elapsed -= 1
-                return max(1, years_elapsed + 1)
-
-            m = re.search(r"(year|yr|y)\s*(\d+)", resid_raw, re.IGNORECASE)
-            if m:
-                try:
-                    return max(1, int(m.group(2)))
-                except Exception:
-                    return None
-            return None
+                elapsed_days = (on_date - pr_date).days
+                years = elapsed_days / 365.0
+                return max(1, math.ceil(years))
+            resid = (getattr(emp, "residency", "") or "")
+            m = re.search(r"[Yy]\s*(\d+)", resid)
+            try:
+                return int(m.group(1)) if m else None
+            except Exception:
+                return None
 
         def _is_casual(emp) -> bool:
             return ((getattr(emp, "employment_type", "") or "").strip().lower() == "casual")
