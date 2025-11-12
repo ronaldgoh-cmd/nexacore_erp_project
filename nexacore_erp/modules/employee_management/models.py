@@ -1,5 +1,5 @@
-from datetime import date
-from sqlalchemy import String, Integer, Float, Date, Boolean, ForeignKey, UniqueConstraint, Text, Index
+from datetime import date, datetime
+from sqlalchemy import String, Integer, Float, Date, DateTime, Boolean, ForeignKey, UniqueConstraint, Text, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from ...core.database import Base
 from ...core.tenant import id as tenant_id
@@ -51,6 +51,7 @@ class Employee(Base):
     salary_history: Mapped[list["SalaryHistory"]] = relationship(back_populates="employee", cascade="all, delete-orphan")
     work_schedule: Mapped[list["WorkScheduleDay"]] = relationship(back_populates="employee", cascade="all, delete-orphan")
     entitlements: Mapped[list["LeaveEntitlement"]] = relationship(back_populates="employee", cascade="all, delete-orphan")
+    leave_applications: Mapped[list["LeaveApplication"]] = relationship(back_populates="employee", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_emp_account_code", "account_id", "code"),
@@ -120,3 +121,23 @@ class LeaveDefault(Base):
     prorated: Mapped[bool] = mapped_column(Boolean, default=False)
     yearly_reset: Mapped[bool] = mapped_column(Boolean, default=True)
     table_json: Mapped[str] = mapped_column(Text, default="{}")   # {"years": {"1":14,...}, "_meta": {...}}
+
+
+class LeaveApplication(Base):
+    __tablename__ = "employee_leave_applications"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, index=True, default="default")
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"), index=True)
+    leave_type: Mapped[str] = mapped_column(String, default="Annual")
+    status: Mapped[str] = mapped_column(String, default="approved")
+    start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    employee: Mapped[Employee] = relationship(back_populates="leave_applications")
+
+    __table_args__ = (
+        Index("ix_emp_leave_window", "account_id", "start_date", "end_date"),
+    )

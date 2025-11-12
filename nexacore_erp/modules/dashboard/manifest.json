@@ -1,0 +1,9 @@
+{
+  "name": "Dashboard",
+  "version": "0.1.0",
+  "submodules": [],
+  "description": "Personalised landing dashboard with configurable widgets.",
+  "always_enabled": true,
+  "always_visible": true,
+  "weight": -1000
+}

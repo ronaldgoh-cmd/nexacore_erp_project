@@ -278,34 +278,47 @@ class MainWindow(QMainWindow):
     def _rebuild_nav(self):
         self.nav.clear()
         mods = discover_modules()
+        mods.sort(
+            key=lambda pair: (
+                0 if pair[0].get("always_enabled") else 1,
+                pair[0].get("weight", 100),
+                pair[0].get("name", ""),
+            )
+        )
         enabled = self._enabled_states()
 
         for info, module in mods:
             mname = info["name"]
-            if not enabled.get(mname):
+            always_enabled = bool(info.get("always_enabled"))
+            always_visible = bool(info.get("always_visible"))
+            if not (always_enabled or enabled.get(mname)):
                 continue
 
             # access check
             if self.user and self.user.role != "superadmin":
-                module_ok = can_view(self.user.id, mname)
+                module_ok = True if always_visible else can_view(self.user.id, mname)
             else:
                 module_ok = True
 
             mitem = QTreeWidgetItem([mname])
             mitem.setData(0, Qt.UserRole, ("module", mname))
+            if always_visible:
+                mitem.setData(0, Qt.UserRole + 1, True)
             any_sub_added = False
 
             for sub in info.get("submodules", []):
                 full = f"{mname}/{sub}"
-                if not enabled.get(full):
+                if not (always_enabled or enabled.get(full)):
                     continue
                 sub_ok = True
                 if self.user and self.user.role != "superadmin":
-                    sub_ok = can_view(self.user.id, mname, sub)
+                    sub_ok = True if always_visible else can_view(self.user.id, mname, sub)
                 if not sub_ok:
                     continue
                 sitem = QTreeWidgetItem([sub])
                 sitem.setData(0, Qt.UserRole, ("submodule", mname, sub))
+                if always_visible:
+                    sitem.setData(0, Qt.UserRole + 1, True)
                 mitem.addChild(sitem)
                 any_sub_added = True
 
@@ -321,7 +334,8 @@ class MainWindow(QMainWindow):
         t = role[0]
 
         # runtime access guard
-        if self.user and self.user.role != "superadmin":
+        is_public = bool(item.data(0, Qt.UserRole + 1))
+        if self.user and self.user.role != "superadmin" and not is_public:
             if t == "module":
                 name = role[1]
                 if not can_view(self.user.id, name):
@@ -393,6 +407,7 @@ class MainWindow(QMainWindow):
             return
 
         mods = discover_modules()
+        protected_modules = {info["name"] for info, _ in mods if info.get("always_enabled")}
         enabled = self._enabled_states()
 
         d = QDialog(self)
@@ -410,6 +425,8 @@ class MainWindow(QMainWindow):
             return it
 
         for info, module in mods:
+            if info.get("always_enabled"):
+                continue
             mname = info["name"]
             m_it = _item(mname, mname, bool(enabled.get(mname)))
             for sub in info.get("submodules", []):
@@ -442,6 +459,8 @@ class MainWindow(QMainWindow):
                 keys = set()
                 for info, _ in mods:
                     mname = info["name"]
+                    if mname in protected_modules:
+                        continue
                     keys.add(mname)
                     for sub in info.get("submodules", []):
                         keys.add(f"{mname}/{sub}")
@@ -450,6 +469,13 @@ class MainWindow(QMainWindow):
                         current[key].enabled = key in checked
                     else:
                         s.add(ModuleState(name=key, enabled=(key in checked)))
+                # Ensure protected modules remain marked as enabled
+                for name in protected_modules:
+                    entry = current.get(name)
+                    if entry:
+                        entry.enabled = True
+                    else:
+                        s.add(ModuleState(name=name, enabled=True))
                 s.commit()
 
             self._rebuild_nav()
