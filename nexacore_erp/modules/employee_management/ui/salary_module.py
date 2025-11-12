@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import math
 from calendar import month_name
 from datetime import date, datetime
 from typing import List, Tuple, Optional
@@ -669,6 +670,20 @@ class SalaryModuleWidget(QWidget):
             return float(Decimal(str(x)).quantize(Decimal('1'), rounding=ROUND_DOWN))
 
         # ---------- CPF rules read + compute (v2) ----------
+        def _normalize_residency(val: str) -> str:
+            txt = (val or "").strip().lower()
+            if not txt:
+                return ""
+            if txt.startswith("permanent resident"):
+                return "permanent resident"
+            if txt.startswith("singapore citizen"):
+                return "singapore citizen"
+            if txt.startswith("foreigner"):
+                return "foreigner"
+            if txt.startswith("non-resident"):
+                return "non-resident"
+            return txt
+
         def _cpf_rows():
             rows = []
             tbl = getattr(self, "cpf_tbl", None)
@@ -683,7 +698,13 @@ class SalaryModuleWidget(QWidget):
 
             def _ri2(x):
                 xs = str(x or "").strip()
-                return int(xs) if xs else None
+                if not xs:
+                    return None
+                try:
+                    return int(xs)
+                except Exception:
+                    m = re.search(r"\d+", xs)
+                    return int(m.group(0)) if m else None
 
             def _rd2(x) -> Optional[date]:
                 s = (str(x or "").strip())
@@ -733,16 +754,43 @@ class SalaryModuleWidget(QWidget):
                 return True
             return True
 
-        def _employee_pr_year(emp) -> Optional[int]:
-            val = getattr(emp, "pr_year", None)
-            if isinstance(val, int):
-                return val
-            resid = (getattr(emp, "residency", "") or "")
-            m = re.search(r"[Yy]\s*(\d+)", resid)
-            try:
-                return int(m.group(1)) if m else None
-            except Exception:
+        def _employee_pr_year(emp, on_date: date) -> Optional[int]:
+            resid_raw = getattr(emp, "residency", "") or ""
+            resid_norm = _normalize_residency(resid_raw)
+            if not resid_norm.startswith("permanent resident"):
                 return None
+
+            val = getattr(emp, "pr_year", None)
+            if isinstance(val, int) and val >= 1:
+                return val
+
+            pr_date = getattr(emp, "pr_date", None)
+            if isinstance(pr_date, str):
+                pr_date = _rd(pr_date)
+            elif isinstance(pr_date, datetime):
+                pr_date = pr_date.date()
+            if isinstance(pr_date, date):
+                if pr_date > on_date:
+                    return None
+                years_elapsed = on_date.year - pr_date.year
+                try:
+                    anniv = pr_date.replace(year=pr_date.year + years_elapsed)
+                except ValueError:
+                    if pr_date.month == 2 and pr_date.day == 29:
+                        anniv = date(pr_date.year + years_elapsed, 2, 28)
+                    else:
+                        anniv = pr_date.replace(year=pr_date.year + years_elapsed, day=pr_date.day - 1)
+                if on_date < anniv:
+                    years_elapsed -= 1
+                return max(1, years_elapsed + 1)
+
+            m = re.search(r"(year|yr|y)\s*(\d+)", resid_raw, re.IGNORECASE)
+            if m:
+                try:
+                    return max(1, int(m.group(2)))
+                except Exception:
+                    return None
+            return None
 
         def _is_casual(emp) -> bool:
             return ((getattr(emp, "employment_type", "") or "").strip().lower() == "casual")
@@ -750,9 +798,9 @@ class SalaryModuleWidget(QWidget):
         def _cpf_for(emp, tw, on_date):
             if _is_casual(emp):
                 return 0.0, 0.0, 0.0
-            resid_emp = (getattr(emp, "residency", "") or "").strip().lower()
+            resid_emp = _normalize_residency(getattr(emp, "residency", "") or "")
             age_years, has_fraction = _age(emp, on_date)
-            pry = _employee_pr_year(emp)
+            pry = _employee_pr_year(emp, on_date)
 
             age_candidates = []
             if has_fraction and age_years >= 60:
@@ -760,6 +808,8 @@ class SalaryModuleWidget(QWidget):
             age_candidates.append(age_years)
 
             rows = _cpf_rows()
+            best_result: Optional[tuple[float, float, float]] = None
+            best_score: Optional[tuple[int, date, int]] = None
             for age_value in age_candidates:
                 for (
                         age_br, resid_row, pr_year, sal_lo, sal_hi,
@@ -767,7 +817,7 @@ class SalaryModuleWidget(QWidget):
                         cap_total, cap_ee, eff_from
                 ) in rows:
 
-                    if resid_row.strip().lower() != resid_emp:
+                    if _normalize_residency(resid_row) != resid_emp:
                         continue
                     if eff_from and eff_from > on_date:
                         continue
@@ -780,6 +830,9 @@ class SalaryModuleWidget(QWidget):
                     if pr_year is not None:
                         if pry is None or pry != pr_year:
                             continue
+                        pr_specific = 1
+                    else:
+                        pr_specific = 1 if pry is None else 0
 
                     off = _CPF_TW_MINUS_OFFSET
 
@@ -796,8 +849,15 @@ class SalaryModuleWidget(QWidget):
                     if ee_val > total_val:
                         ee_val = total_val
                     er_val = float(max(total_val - ee_val, 0.0))
-                    return ee_val, er_val, float(ee_val + er_val)
+                    eff_score = eff_from or date.min
+                    age_specificity = -abs(age_value - age_years)
+                    score = (pr_specific, eff_score, age_specificity)
+                    if best_score is None or score > best_score:
+                        best_score = score
+                        best_result = (ee_val, er_val, float(ee_val + er_val))
 
+            if best_result is not None:
+                return best_result
             return 0.0, 0.0, 0.0
 
         # ---------- SHG ----------
@@ -1613,6 +1673,8 @@ class SalaryModuleWidget(QWidget):
                 btns.addButton(QDialogButtonBox.Close)
             export_btn = btns.addButton("Export CSV", QDialogButtonBox.ActionRole)
             lay.addWidget(btns)
+
+            btns.rejected.connect(dlg.reject)
 
             def _export_csv():
                 default_name = f"Salary_Review_{month_name[m]}_{y}.csv"
