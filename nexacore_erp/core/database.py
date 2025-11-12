@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 # ---------- paths ----------
@@ -69,6 +70,7 @@ def get_module_engine(module_key: str):
             connect_args={"check_same_thread": False},
             pool_pre_ping=True,
             future=True,
+            poolclass=NullPool,
         )
         _module_engines[module_key] = eng
         with eng.connect() as c:
