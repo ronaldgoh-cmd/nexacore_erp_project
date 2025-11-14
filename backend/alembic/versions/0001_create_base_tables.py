@@ -13,7 +13,7 @@ def upgrade() -> None:
         "users",
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("account_id", sa.String(), nullable=False),
-        sa.Column("username", sa.String(), nullable=False),
+        sa.Column("username", sa.String(), nullable=False, unique=True),
         sa.Column("role", sa.String(), nullable=False, server_default="user"),
         sa.Column("password_hash", sa.String(), nullable=False),
         sa.Column("password_enc", sa.LargeBinary(), nullable=True),
@@ -21,9 +21,8 @@ def upgrade() -> None:
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
         sa.Column("is_verified", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
-        sa.UniqueConstraint("account_id", "username", name="uq_users_account_username"),
     )
-    op.create_index("ix_users_username", "users", ["username"])
+    op.create_index("ix_users_username", "users", ["username"], unique=True)
     op.create_index("ix_users_account_id", "users", ["account_id"])
 
     op.create_table(
@@ -39,7 +38,6 @@ def upgrade() -> None:
         sa.Column("join_date", sa.Date(), nullable=True),
         sa.Column("exit_date", sa.Date(), nullable=True),
         sa.Column("basic_salary", sa.Float(), nullable=False, server_default="0"),
-        sa.UniqueConstraint("account_id", "code", name="uq_employees_account_code"),
     )
     op.create_index("ix_emp_account_code", "employees", ["account_id", "code"])
     op.create_index("ix_emp_account_fullname", "employees", ["account_id", "full_name"])

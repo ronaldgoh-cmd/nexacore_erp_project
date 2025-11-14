@@ -19,17 +19,12 @@ class TokenData(BaseModel):
     account_id: str
 
 
-class UserLogin(BaseModel):
-    """Credentials supplied during login."""
+class UserCreate(BaseModel):
+    """Payload for user registration."""
 
     username: str
     password: str
     account_id: str
-
-
-class UserCreate(UserLogin):
-    """Payload for user registration."""
-
     email: EmailStr | None = None
 
 

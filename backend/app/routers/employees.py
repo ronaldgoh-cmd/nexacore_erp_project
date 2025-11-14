@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..dependencies import get_current_user, get_db_session
+from ..dependencies import get_current_user, get_db_session, require_same_tenant
 from ..models import Employee, User
 from ..schemas import EmployeeCreate, EmployeeRead
 
@@ -33,6 +33,7 @@ async def create_employee(
 ) -> Employee:
     """Create an employee scoped to the authenticated tenant."""
 
+    require_same_tenant(current_user, current_user.account_id)
     duplicate = await session.execute(
         select(Employee).where(
             Employee.account_id == current_user.account_id,

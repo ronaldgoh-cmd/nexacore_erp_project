@@ -1,13 +1,13 @@
 """Employee model for the backend API."""
 from datetime import date
 
-from sqlalchemy import Date, Float, Index, Integer, String, UniqueConstraint
+from sqlalchemy import Date, Float, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .base import Base, TenantMixin
+from .base import Base
 
 
-class Employee(TenantMixin, Base):
+class Employee(Base):
     """Subset of employee fields needed for the initial API."""
 
     __tablename__ = "employees"
@@ -24,7 +24,6 @@ class Employee(TenantMixin, Base):
     basic_salary: Mapped[float] = mapped_column(Float, default=0.0)
 
     __table_args__ = (
-        UniqueConstraint("account_id", "code", name="uq_employees_account_code"),
         Index("ix_emp_account_code", "account_id", "code"),
         Index("ix_emp_account_fullname", "account_id", "full_name"),
     )

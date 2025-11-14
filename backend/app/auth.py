@@ -9,7 +9,7 @@ from .config import get_settings
 from .database import get_session
 from .dependencies import token_payload
 from .models import User
-from .schemas import Token, UserCreate, UserLogin, UserRead, compute_expiry
+from .schemas import Token, UserCreate, UserRead, compute_expiry
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -33,12 +33,7 @@ async def register_user(
 ) -> User:
     """Create a tenant-scoped user account."""
 
-    existing = await session.execute(
-        select(User).where(
-            User.account_id == payload.account_id,
-            User.username == payload.username,
-        )
-    )
+    existing = await session.execute(select(User).where(User.username == payload.username))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username already exists")
 
@@ -56,7 +51,7 @@ async def register_user(
 
 @router.post("/login", response_model=Token)
 async def login(
-    payload: UserLogin, session: AsyncSession = Depends(get_session)
+    payload: UserCreate, session: AsyncSession = Depends(get_session)
 ) -> Token:
     """Authenticate a user and return a JWT access token."""
 

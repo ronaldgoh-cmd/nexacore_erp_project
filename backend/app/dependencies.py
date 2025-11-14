@@ -32,11 +32,6 @@ async def get_current_user(
     try:
         payload = jwt.decode(token, settings.secret_key, algorithms=["HS256"])
         token_data = TokenData(**payload)
-    except jwt.ExpiredSignatureError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has expired",
-        ) from exc
     except jwt.PyJWTError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -51,6 +46,16 @@ async def get_current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Inactive or missing user")
 
     return user
+
+
+def require_same_tenant(user: User, account_id: str) -> None:
+    """Raise if the requested tenant does not match the authenticated user."""
+
+    if user.account_id != account_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tenant mismatch",
+        )
 
 
 def token_payload(user: User) -> dict[str, str]:

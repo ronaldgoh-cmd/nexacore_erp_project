@@ -196,7 +196,7 @@ Record the allocated IP address in Bitwarden.
    - **Name**: `DATABASE_URL`
      - **Secret value**: `postgresql+asyncpg://nexacore_app:<PASSWORD>@/nexacore?host=/cloudsql/<INSTANCE_CONNECTION_NAME>`
        (replace placeholders). This format works with the Cloud SQL Proxy socket.
-   - **Name**: `SECRET_KEY`
+   - **Name**: `JWT_SECRET`
      - Generate a 64-character random string (`openssl rand -hex 32`) and paste it.
    - **Name**: `SMTP_PASSWORD` (if you plan to send emails).
 3. After each creation, click **Add a new version** if you later rotate values.
@@ -381,7 +381,7 @@ sqlalchemy = "^2.0"
 asyncpg = "^0.29"
 alembic = "^1.13"
 pydantic = "^2.5"
-pydantic-settings = "^2.2"
+python-dotenv = "^1.0"
 httpx = "^0.27"
 passlib = "^1.7"
 pyjwt = "^2.8"
@@ -400,7 +400,6 @@ build-backend = "setuptools.build_meta"
    ```dotenv
    DATABASE_URL=postgresql+asyncpg://nexacore_app:<password>@127.0.0.1:5432/nexacore
    SECRET_KEY=replace-me
-   ACCESS_TOKEN_EXPIRES_MINUTES=1440
    ```
    When running on the VM, the Cloud SQL Proxy listens on `127.0.0.1:5432`, so
    this matches.
@@ -526,18 +525,18 @@ build-backend = "setuptools.build_meta"
    IMAGE="$1"
    CONTAINER_NAME=nexacore-backend
 
-    docker pull "$IMAGE"
-    docker stop "$CONTAINER_NAME" 2>/dev/null || true
-    docker rm "$CONTAINER_NAME" 2>/dev/null || true
+   docker pull "$IMAGE"
+   docker stop "$CONTAINER_NAME" 2>/dev/null || true
+   docker rm "$CONTAINER_NAME" 2>/dev/null || true
 
-    docker run -d \
-      --name "$CONTAINER_NAME" \
-      --restart unless-stopped \
-      -p 443:8000 \
-      --env PORT=8000 \
-      --env DATABASE_URL=$(gcloud secrets versions access latest --secret=DATABASE_URL) \
-      --env SECRET_KEY=$(gcloud secrets versions access latest --secret=SECRET_KEY) \
-      "$IMAGE"
+   docker run -d \
+     --name "$CONTAINER_NAME" \
+     --restart unless-stopped \
+     -p 443:8000 \
+     --env PORT=8000 \
+     --env DATABASE_URL=$(gcloud secrets versions access latest --secret=DATABASE_URL) \
+     --env JWT_SECRET=$(gcloud secrets versions access latest --secret=JWT_SECRET) \
+     "$IMAGE"
    ```
 3. Make it executable: `chmod +x deploy.sh`.
 4. Test the script: `./deploy.sh <REGION>-docker.pkg.dev/<PROJECT_ID>/nexacore-backend/api:0.1.0`.
