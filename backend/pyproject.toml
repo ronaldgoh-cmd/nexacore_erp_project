@@ -1,0 +1,30 @@
+[project]
+name = "nexacore-backend"
+version = "0.1.0"
+description = "FastAPI backend for NexaCore ERP"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110,<0.112",
+    "uvicorn[standard]>=0.29,<0.31",
+    "sqlalchemy[asyncio]>=2.0,<2.1",
+    "asyncpg>=0.29,<0.30",
+    "alembic>=1.13,<1.14",
+    "pydantic>=2.5,<2.7",
+    "python-dotenv>=1.0,<2.0",
+    "httpx>=0.27,<0.28",
+    "passlib[bcrypt]>=1.7,<1.8",
+    "pyjwt>=2.8,<2.9"
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0,<9.0",
+    "pytest-asyncio>=0.23,<0.24"
+]
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["app"]
