@@ -12,18 +12,21 @@ from .models import User
 from .schemas import Token, UserCreate, UserRead, compute_expiry
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Use PBKDF2-SHA256 instead of bcrypt to avoid bcrypt backend issues
+password_context = CryptContext(
+    schemes=["pbkdf2_sha256"],
+    deprecated="auto",
+)
 
 
 def hash_password(password: str) -> str:
     """Hash a password for storage."""
-
     return password_context.hash(password)
 
 
 def verify_password(password: str, password_hash: str) -> bool:
     """Check a plain password against the stored hash."""
-
     return password_context.verify(password, password_hash)
 
 
@@ -33,9 +36,15 @@ async def register_user(
 ) -> User:
     """Create a tenant-scoped user account."""
 
-    existing = await session.execute(select(User).where(User.username == payload.username))
+    # Ensure username is unique within the whole system
+    existing = await session.execute(
+        select(User).where(User.username == payload.username)
+    )
     if existing.scalar_one_or_none():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username already exists")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already exists",
+        )
 
     user = User(
         username=payload.username,
@@ -57,11 +66,17 @@ async def login(
 
     settings = get_settings()
     result = await session.execute(
-        select(User).where(User.username == payload.username, User.account_id == payload.account_id)
+        select(User).where(
+            User.username == payload.username,
+            User.account_id == payload.account_id,
+        )
     )
     user = result.scalar_one_or_none()
     if user is None or not verify_password(payload.password, user.password_hash):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+        )
 
     expires_at = compute_expiry(settings.access_token_expires_minutes)
     encoded = jwt.encode(

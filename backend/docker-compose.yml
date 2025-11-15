@@ -1,24 +1,37 @@
 version: "3.9"
 
 services:
-  api:
-    build: .
-    env_file:
-      - .env
-    ports:
-      - "8000:8000"
-    depends_on:
-      - db
   db:
     image: postgres:15
-    restart: unless-stopped
+    container_name: nexacore-db
     environment:
-      POSTGRES_USER: nexacore_app
-      POSTGRES_PASSWORD: nexacore_pass
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
       POSTGRES_DB: nexacore
     ports:
-      - "5432:5432"
+      # Host port 5433 -> container port 5432 (so it doesn't clash with your Windows Postgres)
+      - "5433:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d nexacore"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    container_name: nexacore-backend
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env.docker
+    ports:
+      - "8000:8000"
+    environment:
+      # uvicorn port (already set in Dockerfile, but explicit here too)
+      PORT: 8000
+
 volumes:
-  postgres_data:
+  pgdata:
