@@ -1,11 +1,16 @@
 # nexacore_erp/ui/login_dialog.py
 from __future__ import annotations
+
+import asyncio
+
 from PySide6.QtCore import Qt, QSettings
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QCheckBox,
-    QPushButton, QDialogButtonBox, QWidget, QFormLayout
+    QPushButton, QDialogButtonBox, QWidget, QFormLayout, QMessageBox
 )
 from PySide6.QtGui import QPixmap
+
+from nexacore_erp.services.api_client import get_api_client
 
 
 class LoginDialog(QDialog):
@@ -27,8 +32,11 @@ class LoginDialog(QDialog):
 
         # Form
         form = QFormLayout()
-        self.ed_user = QLineEdit(); self.ed_user.setPlaceholderText("Username")
-        self.ed_pass = QLineEdit(); self.ed_pass.setEchoMode(QLineEdit.Password); self.ed_pass.setPlaceholderText("Password")
+        self.ed_user = QLineEdit()
+        self.ed_user.setPlaceholderText("Username")
+        self.ed_pass = QLineEdit()
+        self.ed_pass.setEchoMode(QLineEdit.Password)
+        self.ed_pass.setPlaceholderText("Password")
         form.addRow("Username", self.ed_user)
         form.addRow("Password", self.ed_pass)
         root.addLayout(form)
@@ -95,7 +103,48 @@ class LoginDialog(QDialog):
             self.settings.setValue("login/remember_pass", False)
             self.settings.remove("login/password")
 
+    async def _do_login(self, username: str, password: str) -> None:
+        """
+        Perform backend login via the shared API client.
+
+        On success this stores the JWT token inside APIClient, so the rest
+        of the app can call authenticated endpoints.
+        """
+        client = get_api_client()
+        # For now we hard-code a single tenant / account.
+        # Later you can add an "Account / Company" field to this dialog.
+        await client.login(
+            username=username,
+            password=password,
+            account_id="default",
+        )
+
     def _on_login_clicked(self) -> None:
+        username = self.ed_user.text().strip()
+        password = self.ed_pass.text()
+
+        if not username or not password:
+            QMessageBox.warning(
+                self,
+                "Sign in failed",
+                "Username and password are required.",
+            )
+            return
+
+        try:
+            # Run the async login call synchronously for now.
+            asyncio.run(self._do_login(username, password))
+        except Exception as exc:
+            # You can log `exc` somewhere if you have a logger.
+            QMessageBox.critical(
+                self,
+                "Sign in failed",
+                "Could not sign in. Please check your username and password "
+                "or try again later.",
+            )
+            return
+
+        # Only cache on successful login
         self._cache_now()
         self.accept()
 

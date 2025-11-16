@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QListWidgetItem, QHeaderView, QAbstractItemView, QSizePolicy, QListWidget,
     QInputDialog, QApplication, QDateTimeEdit
 )
-from PySide6.QtWidgets import QCalendarWidget  # add this near your other QtWidgets imports
+from PySide6.QtWidgets import QCalendarWidget
 from PySide6.QtWidgets import QDoubleSpinBox
 
 # -------- Roles & Access manifest --------
@@ -20,9 +20,10 @@ MODULE_KEY = "employee_management"
 MODULE_NAME = "Employee Management"
 SUBMODULES = [
     ("list",     "Employee List"),
-    ("defaults", "Default Leave"),   # change if your tab label differs
-    ("settings", "Settings"),        # change if needed
+    ("defaults", "Default Leave"),
+    ("settings", "Settings"),
 ]
+
 
 def module_manifest() -> dict:
     return {
@@ -31,10 +32,14 @@ def module_manifest() -> dict:
         "submodules": [{"key": k, "name": n} for k, n in SUBMODULES],
     }
 
+
 # ---- shared date helpers ----
 MIN_DATE = date(1900, 1, 1)
+
+
 def _fmt_date(d: date | None) -> str:
     return "" if (not d or d <= MIN_DATE) else d.strftime("%Y-%m-%d")
+
 
 def _clean_text(s: str) -> str:
     """
@@ -45,9 +50,11 @@ def _clean_text(s: str) -> str:
         return ""
     s = unicodedata.normalize("NFKC", s)
     # replace common smart quotes with ASCII
-    s = (s.replace("\u2018", "'").replace("\u2019", "'")
-           .replace("\u201c", '"').replace("\u201d", '"')
-           .replace("\u00a0", " "))
+    s = (
+        s.replace("\u2018", "'").replace("\u2019", "'")
+         .replace("\u201c", '"').replace("\u201d", '"')
+         .replace("\u00a0", " ")
+    )
     # strip zero-width
     s = re.sub(r"[\u200B-\u200D\uFEFF]", "", s)
     return s.strip()
@@ -56,6 +63,7 @@ def _clean_text(s: str) -> str:
 class BlankableDateEdit(QDateEdit):
     """Truly blank until set. Popup calendar defaults to today when blank.
        Clear with Delete, Backspace, Esc, or double-click."""
+
     class _PopupCalendar(QCalendarWidget):
         def __init__(self, owner):
             super().__init__()
@@ -141,6 +149,7 @@ from ..models import (
     WorkScheduleDay, LeaveEntitlement
 )
 
+
 # ---- block wheel changes on all combo boxes (when popup closed) ----
 class _NoWheelFilter(QObject):
     def eventFilter(self, obj, ev):
@@ -151,6 +160,7 @@ class _NoWheelFilter(QObject):
                 if ev.key() in (Qt.Key_PageUp, Qt.Key_PageDown):
                     return True
         return False
+
 
 _NO_WHEEL_FILTER = _NoWheelFilter()
 app = QApplication.instance()
@@ -203,8 +213,11 @@ def _ensure_dropdown_defaults(category: str) -> None:
                 )
             )
         s.commit()
+
+
 # persist employee code format to a small json file next to this module
 SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "employee_settings.json")
+
 
 def _load_code_settings():
     try:
@@ -216,12 +229,14 @@ def _load_code_settings():
     except Exception:
         return "EM-", 4
 
+
 def _save_code_settings(prefix: str, zpad: int):
     try:
         with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump({"prefix": prefix, "zpad": int(zpad)}, f)
     except Exception:
         pass
+
 
 # Columns for Employee List table (order matters)
 COLS = [
@@ -263,11 +278,14 @@ class EmployeeMainWidget(QWidget):
 
         added = False
         if self._allowed("Employee List"):
-            self._build_employee_list_tab(); added = True
+            self._build_employee_list_tab()
+            added = True
         if self._allowed("Holidays"):
-            self._build_holidays_tab(); added = True
+            self._build_holidays_tab()
+            added = True
         if self._allowed("Employee Settings"):
-            self._build_settings_tab(); added = True
+            self._build_settings_tab()
+            added = True
 
         if not added:
             self._no_access_placeholder()
@@ -319,10 +337,15 @@ class EmployeeMainWidget(QWidget):
     def _opts(self, category: str) -> list[str]:
         _ensure_dropdown_defaults(category)
         with SessionLocal() as s:
-            rows = s.query(DropdownOption)\
-                    .filter(DropdownOption.account_id == tenant_id(),
-                            DropdownOption.category == category)\
-                    .order_by(DropdownOption.value).all()
+            rows = (
+                s.query(DropdownOption)
+                .filter(
+                    DropdownOption.account_id == tenant_id(),
+                    DropdownOption.category == category,
+                )
+                .order_by(DropdownOption.value)
+                .all()
+            )
         return [r.value for r in rows]
 
     # ---------------- Employee List ----------------
@@ -346,9 +369,12 @@ class EmployeeMainWidget(QWidget):
         self.quick_search = QLineEdit()
         self.quick_search.setPlaceholderText("Quick search (any column)…")
         self.quick_search.textChanged.connect(self._apply_filters)
-        btn_add = QPushButton("Add"); btn_add.clicked.connect(self._add_employee)
-        btn_edit = QPushButton("Edit"); btn_edit.clicked.connect(self._edit_employee)
-        btn_del = QPushButton("Delete"); btn_del.clicked.connect(self._delete_employee)
+        btn_add = QPushButton("Add")
+        btn_add.clicked.connect(self._add_employee)
+        btn_edit = QPushButton("Edit")
+        btn_edit.clicked.connect(self._edit_employee)
+        btn_del = QPushButton("Delete")
+        btn_del.clicked.connect(self._delete_employee)
         for w in (self.quick_search, btn_add, btn_edit, btn_del):
             actions.addWidget(w)
         lv.addLayout(actions)
@@ -380,16 +406,48 @@ class EmployeeMainWidget(QWidget):
             return cb
 
         r = 0
-        add_filter(r, "Status", "employment_status", lambda: mk_dd(["Active", "Non-Active"])); r += 1
-        add_filter(r, "Employee Code", "code", QLineEdit); r += 1
-        add_filter(r, "Employee Name", "full_name", QLineEdit); r += 1
-        add_filter(r, "Department", "department", lambda: mk_dd(self._opts("Department"))); r += 1
-        add_filter(r, "Position", "position",   lambda: mk_dd(self._opts("Position"))); r += 1
-        add_filter(r, "Employment Type", "employment_type", lambda: mk_dd(self._opts("Employment Type") or ["Full-Time", "Part-Time", "Contract"])); r += 1
-        add_filter(r, "ID Type", "id_type",     lambda: mk_dd(self._opts("ID Type"))); r += 1
-        add_filter(r, "ID Number", "id_number", QLineEdit); r += 1
-        add_filter(r, "Country", "country",     lambda: mk_dd(self._opts("Country"))); r += 1
-        add_filter(r, "Residency", "residency", lambda: mk_dd(self._opts("Residency") or ["Citizen", "Permanent Resident", "Work Pass"])); r += 1
+        add_filter(
+            r, "Status", "employment_status", lambda: mk_dd(["Active", "Non-Active"])
+        )
+        r += 1
+        add_filter(r, "Employee Code", "code", QLineEdit)
+        r += 1
+        add_filter(r, "Employee Name", "full_name", QLineEdit)
+        r += 1
+        add_filter(
+            r, "Department", "department", lambda: mk_dd(self._opts("Department"))
+        )
+        r += 1
+        add_filter(
+            r, "Position", "position", lambda: mk_dd(self._opts("Position"))
+        )
+        r += 1
+        add_filter(
+            r,
+            "Employment Type",
+            "employment_type",
+            lambda: mk_dd(
+                self._opts("Employment Type")
+                or ["Full-Time", "Part-Time", "Contract"]
+            ),
+        )
+        r += 1
+        add_filter(r, "ID Type", "id_type", lambda: mk_dd(self._opts("ID Type")))
+        r += 1
+        add_filter(r, "ID Number", "id_number", QLineEdit)
+        r += 1
+        add_filter(r, "Country", "country", lambda: mk_dd(self._opts("Country")))
+        r += 1
+        add_filter(
+            r,
+            "Residency",
+            "residency",
+            lambda: mk_dd(
+                self._opts("Residency")
+                or ["Citizen", "Permanent Resident", "Work Pass"]
+            ),
+        )
+        r += 1
 
         # Age numeric filters (not dropdown)
         def mk_age():
@@ -398,8 +456,11 @@ class EmployeeMainWidget(QWidget):
             sp.setSpecialValueText("")  # 0 acts as blank
             sp.setValue(0)
             return sp
-        add_filter(r, "Age ≥", "age_min", mk_age); r += 1
-        add_filter(r, "Age ≤", "age_max", mk_age); r += 1
+
+        add_filter(r, "Age ≥", "age_min", mk_age)
+        r += 1
+        add_filter(r, "Age ≤", "age_max", mk_age)
+        r += 1
 
         fbv.addLayout(grid)
 
@@ -486,16 +547,34 @@ class EmployeeMainWidget(QWidget):
             if not ((e.code or "").strip() or (e.full_name or "").strip()):
                 return False
             if txt:
-                hay = " ".join([
-                    str(e.employment_status or ""), str(e.code or ""), str(e.full_name or ""),
-                    str(getattr(e, "department", "") or ""), str(e.position or ""),
-                    str(e.employment_type or ""), str(e.id_type or ""), str(e.id_number or ""),
-                    str(e.country or ""), str(e.residency or "")
-                ]).lower()
+                hay = " ".join(
+                    [
+                        str(e.employment_status or ""),
+                        str(e.code or ""),
+                        str(e.full_name or ""),
+                        str(getattr(e, "department", "") or ""),
+                        str(e.position or ""),
+                        str(e.employment_type or ""),
+                        str(e.id_type or ""),
+                        str(e.id_number or ""),
+                        str(e.country or ""),
+                        str(e.residency or ""),
+                    ]
+                ).lower()
                 if txt not in hay:
                     return False
-            for key in ["employment_status", "code", "full_name", "department", "position",
-                        "employment_type", "id_type", "id_number", "country", "residency"]:
+            for key in [
+                "employment_status",
+                "code",
+                "full_name",
+                "department",
+                "position",
+                "employment_type",
+                "id_type",
+                "id_number",
+                "country",
+                "residency",
+            ]:
                 val = f_get(key)
                 if val and val not in str(getattr(e, key, "") or "").lower():
                     return False
@@ -529,7 +608,9 @@ class EmployeeMainWidget(QWidget):
             age_txt = ""
             if e.dob and e.dob > MIN_DATE:
                 try:
-                    age_txt = str(int((datetime.utcnow().date() - e.dob).days // 365.25))
+                    age_txt = str(
+                        int((datetime.utcnow().date() - e.dob).days // 365.25)
+                    )
                 except Exception:
                     age_txt = ""
             id_type = e.id_type or ""
@@ -539,8 +620,22 @@ class EmployeeMainWidget(QWidget):
             join_date = _fmt_date(e.join_date)
             exit_date = _fmt_date(e.exit_date)
 
-            values = [employment_status, code, full_name, department, position, employment_type,
-                      dob_txt, age_txt, id_type, id_number, country, residency, join_date, exit_date]
+            values = [
+                employment_status,
+                code,
+                full_name,
+                department,
+                position,
+                employment_type,
+                dob_txt,
+                age_txt,
+                id_type,
+                id_number,
+                country,
+                residency,
+                join_date,
+                exit_date,
+            ]
             for c, v in enumerate(values):
                 put(c, v)
 
@@ -557,14 +652,37 @@ class EmployeeMainWidget(QWidget):
         v = QVBoxLayout(host)
         frm = QFormLayout()
         fields = [
-            "Employee Code", "Full Name", "Email", "Contact Number", "Address",
-            "ID Type", "ID Number", "Gender", "Date of Birth", "Age", "Race",
-            "Country", "Residency", "PR Date",
-            "Employment Status", "Employment Pass", "Work Permit Number",
-            "Department", "Position", "Employment Type",
-            "Join Date", "Exit Date", "Holiday Group",
-            "Bank", "Account Number",
-            "Basic Salary", "Incentives", "Allowance", "Overtime Rate", "Part Time Rate", "Levy"
+            "Employee Code",
+            "Full Name",
+            "Email",
+            "Contact Number",
+            "Address",
+            "ID Type",
+            "ID Number",
+            "Gender",
+            "Date of Birth",
+            "Age",
+            "Race",
+            "Country",
+            "Residency",
+            "PR Date",
+            "Employment Status",
+            "Employment Pass",
+            "Work Permit Number",
+            "Department",
+            "Position",
+            "Employment Type",
+            "Join Date",
+            "Exit Date",
+            "Holiday Group",
+            "Bank",
+            "Account Number",
+            "Basic Salary",
+            "Incentives",
+            "Allowance",
+            "Overtime Rate",
+            "Part Time Rate",
+            "Levy",
         ]
         labels = {}
         for f in fields:
@@ -679,7 +797,12 @@ class EmployeeMainWidget(QWidget):
         emp_id = int(id_item.text()) if id_item else None
         if not emp_id:
             return
-        if QMessageBox.question(self, "Delete", "Delete selected employee?") != QMessageBox.Yes:
+        if (
+            QMessageBox.question(
+                self, "Delete", "Delete selected employee?"
+            )
+            != QMessageBox.Yes
+        ):
             return
         with SessionLocal() as s:
             e = s.get(Employee, emp_id)
@@ -691,16 +814,32 @@ class EmployeeMainWidget(QWidget):
 
     # ---------------- Holidays ----------------
     def _build_holidays_tab(self):
-        host = QWidget(); v = QVBoxLayout(host)
+        host = QWidget()
+        v = QVBoxLayout(host)
         top = QHBoxLayout()
-        self.h_group = QLineEdit(); self.h_group.setPlaceholderText("Holiday Group e.g. A or B")
-        self.h_name = QLineEdit(); self.h_name.setPlaceholderText("Holiday Name")
-        self.h_date = QLineEdit(); self.h_date.setPlaceholderText("Date DD-MM-YYYY")
-        btn_add = QPushButton("Add"); btn_add.clicked.connect(self._holiday_add)
-        btn_del = QPushButton("Delete Selected"); btn_del.clicked.connect(self._holiday_del)
-        btn_imp = QPushButton("Import CSV"); btn_imp.clicked.connect(self._holiday_import_csv)
-        btn_tpl = QPushButton("Download Template"); btn_tpl.clicked.connect(self._holiday_template)
-        for w in (self.h_group, self.h_name, self.h_date, btn_add, btn_del, btn_imp, btn_tpl):
+        self.h_group = QLineEdit()
+        self.h_group.setPlaceholderText("Holiday Group e.g. A or B")
+        self.h_name = QLineEdit()
+        self.h_name.setPlaceholderText("Holiday Name")
+        self.h_date = QLineEdit()
+        self.h_date.setPlaceholderText("Date DD-MM-YYYY")
+        btn_add = QPushButton("Add")
+        btn_add.clicked.connect(self._holiday_add)
+        btn_del = QPushButton("Delete Selected")
+        btn_del.clicked.connect(self._holiday_del)
+        btn_imp = QPushButton("Import CSV")
+        btn_imp.clicked.connect(self._holiday_import_csv)
+        btn_tpl = QPushButton("Download Template")
+        btn_tpl.clicked.connect(self._holiday_template)
+        for w in (
+            self.h_group,
+            self.h_name,
+            self.h_date,
+            btn_add,
+            btn_del,
+            btn_imp,
+            btn_tpl,
+        ):
             top.addWidget(w)
         v.addLayout(top)
 
@@ -731,7 +870,9 @@ class EmployeeMainWidget(QWidget):
             self.h_table.insertRow(row)
             self.h_table.setItem(row, 0, QTableWidgetItem(r.group_code))
             self.h_table.setItem(row, 1, QTableWidgetItem(r.name))
-            self.h_table.setItem(row, 2, QTableWidgetItem(r.date.strftime("%d-%m-%Y")))
+            self.h_table.setItem(
+                row, 2, QTableWidgetItem(r.date.strftime("%d-%m-%Y"))
+            )
 
         self.h_table.resizeColumnsToContents()
 
@@ -740,36 +881,64 @@ class EmployeeMainWidget(QWidget):
         n = _clean_text(self.h_name.text())
         d = _clean_text(self.h_date.text())
         if not (g and n and d):
-            QMessageBox.warning(self, "Holiday", "Fill group, name, date (DD-MM-YYYY)"); return
+            QMessageBox.warning(
+                self, "Holiday", "Fill group, name, date (DD-MM-YYYY)"
+            )
+            return
         try:
-            day, month, year = map(int, d.split("-")); dt = date(year, month, day)
+            day, month, year = map(int, d.split("-"))
+            dt = date(year, month, day)
         except Exception:
-            QMessageBox.warning(self, "Holiday", "Date format must be DD-MM-YYYY"); return
+            QMessageBox.warning(self, "Holiday", "Date format must be DD-MM-YYYY")
+            return
         with SessionLocal() as s:
             s.add(Holiday(account_id=tenant_id(), group_code=g, name=n, date=dt))
-            try: s.commit()
+            try:
+                s.commit()
             except Exception as ex:
-                s.rollback(); QMessageBox.warning(self, "Holiday", f"Duplicate or invalid: {ex}")
+                s.rollback()
+                QMessageBox.warning(
+                    self, "Holiday", f"Duplicate or invalid: {ex}"
+                )
         self._holiday_reload()
 
     def _holiday_del(self):
-        rows = sorted({r.row() for r in self.h_table.selectedIndexes()}, reverse=True)
-        if not rows: return
+        rows = sorted(
+            {r.row() for r in self.h_table.selectedIndexes()}, reverse=True
+        )
+        if not rows:
+            return
         items = []
         for r in rows:
-            items.append((self.h_table.item(r, 0).text(), self.h_table.item(r, 1).text(), self.h_table.item(r, 2).text()))
+            items.append(
+                (
+                    self.h_table.item(r, 0).text(),
+                    self.h_table.item(r, 1).text(),
+                    self.h_table.item(r, 2).text(),
+                )
+            )
         with SessionLocal() as s:
             for g, n, d in items:
-                day, month, year = map(int, d.split("-")); dt = date(year, month, day)
-                q = s.query(Holiday).filter(Holiday.account_id == tenant_id(), Holiday.group_code == g, Holiday.name == n, Holiday.date == dt)
-                for h in q.all(): s.delete(h)
+                day, month, year = map(int, d.split("-"))
+                dt = date(year, month, day)
+                q = s.query(Holiday).filter(
+                    Holiday.account_id == tenant_id(),
+                    Holiday.group_code == g,
+                    Holiday.name == n,
+                    Holiday.date == dt,
+                )
+                for h in q.all():
+                    s.delete(h)
             s.commit()
         self._holiday_reload()
 
     def _holiday_import_csv(self):
-        import csv, io
+        import csv
+        import io
 
-        path, _ = QFileDialog.getOpenFileName(self, "Import Holidays CSV", "", "CSV Files (*.csv)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Holidays CSV", "", "CSV Files (*.csv)"
+        )
         if not path:
             return
 
@@ -793,9 +962,13 @@ class EmployeeMainWidget(QWidget):
 
         # normalise once here
         text = unicodedata.normalize("NFKC", text)
-        text = (text.replace("\u00a0", " ")
-                    .replace("\u2018", "'").replace("\u2019", "'")
-                    .replace("\u201c", '"').replace("\u201d", '"'))
+        text = (
+            text.replace("\u00a0", " ")
+            .replace("\u2018", "'")
+            .replace("\u2019", "'")
+            .replace("\u201c", '"')
+            .replace("\u201d", '"')
+        )
         text = re.sub(r"[\u200B-\u200D\uFEFF]", "", text)
 
         # sniff delimiter
@@ -849,14 +1022,16 @@ class EmployeeMainWidget(QWidget):
 
         if min(i_g, i_n, i_d) < 0:
             QMessageBox.warning(
-                self, "Holidays",
+                self,
+                "Holidays",
                 "Missing required headers. Need columns that map to: group, name, date.\n"
-                f"Detected headers: {headers}\nEncoding: {used_enc}, delimiter: '{delim}'"
+                f"Detected headers: {headers}\nEncoding: {used_enc}, delimiter: '{delim}'",
             )
             return
 
         def parse_date(s: str):
             from datetime import timedelta
+
             s = _clean_text(s)
             if not s:
                 return None
@@ -873,10 +1048,20 @@ class EmployeeMainWidget(QWidget):
 
             fmts = (
                 "%Y-%m-%d",
-                "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y",
-                "%d-%m-%y", "%d/%m/%y", "%m/%d/%y",
-                "%d-%b-%Y", "%d %b %Y", "%d-%B-%Y", "%d %B %Y",
-                "%d-%b-%y", "%d %b %y", "%d-%B-%y", "%d %B %y",
+                "%d-%m-%Y",
+                "%d/%m/%Y",
+                "%m/%d/%Y",
+                "%d-%m-%y",
+                "%d/%m/%y",
+                "%m/%d/%y",
+                "%d-%b-%Y",
+                "%d %b %Y",
+                "%d-%B-%Y",
+                "%d %B %Y",
+                "%d-%b-%y",
+                "%d %b %y",
+                "%d-%B-%y",
+                "%d %B %y",
             )
             for fmt in fmts:
                 try:
@@ -900,7 +1085,9 @@ class EmployeeMainWidget(QWidget):
                 if not g or not n or not d:
                     skipped += 1
                     if len(reasons) < 5:
-                        reasons.append(f"Missing field(s): group='{g}', name='{n}', date='{d}'")
+                        reasons.append(
+                            f"Missing field(s): group='{g}', name='{n}', date='{d}'"
+                        )
                     continue
 
                 dt = parse_date(d)
@@ -911,28 +1098,47 @@ class EmployeeMainWidget(QWidget):
                     continue
 
                 try:
-                    s.add(Holiday(account_id=tenant_id(), group_code=g, name=n, date=dt))
+                    s.add(
+                        Holiday(
+                            account_id=tenant_id(),
+                            group_code=g,
+                            name=n,
+                            date=dt,
+                        )
+                    )
                     s.flush()
                     inserted += 1
                 except Exception as ex:
                     s.rollback()
                     skipped += 1
                     if len(reasons) < 5:
-                        reasons.append(f"DB reject for '{g}-{n}-{dt}': {ex}")
+                        reasons.append(
+                            f"DB reject for '{g}-{n}-{dt}': {ex}"
+                        )
 
             s.commit()
 
-        detail = ("\nReasons (first 5):\n- " + "\n- ".join(reasons)) if reasons else ""
+        detail = (
+            "\nReasons (first 5):\n- " + "\n- ".join(reasons)
+        ) if reasons else ""
         QMessageBox.information(
-            self, "Holidays",
-            f"Encoding: {used_enc}\nDelimiter: '{delim}'\nImported: {inserted}\nSkipped: {skipped}{detail}"
+            self,
+            "Holidays",
+            f"Encoding: {used_enc}\nDelimiter: '{delim}'\nImported: {inserted}\nSkipped: {skipped}{detail}",
         )
         self._holiday_reload()
 
     def _holiday_template(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Save CSV Template", "holiday_template.csv", "CSV Files (*.csv)")
-        if not path: return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save CSV Template",
+            "holiday_template.csv",
+            "CSV Files (*.csv)",
+        )
+        if not path:
+            return
         import csv
+
         with open(path, "w", newline="", encoding="utf-8") as f:
             wr = csv.writer(f)
             wr.writerow(["group", "name", "date"])
@@ -955,7 +1161,9 @@ class EmployeeMainWidget(QWidget):
 
         frm.addRow("Employee ID Prefix", self.id_prefix)
         frm.addRow("Zero Padding", self.zero_pad)
-        self.id_preview = QLabel(f"Preview: {EMP_CODE_PREFIX}{1:0{EMP_CODE_ZPAD}d}")
+        self.id_preview = QLabel(
+            f"Preview: {EMP_CODE_PREFIX}{1:0{EMP_CODE_ZPAD}d}"
+        )
         btn_apply = QPushButton("Apply")
         btn_apply.clicked.connect(self._apply_id_format)
         v.addLayout(frm)
@@ -1003,15 +1211,32 @@ class EmployeeMainWidget(QWidget):
             QMessageBox.warning(self, "Export", "openpyxl not installed")
             return
 
-        path, _ = QFileDialog.getSaveFileName(self, "Export Employees", "employees.xlsx", "Excel (*.xlsx)")
-        if not path: return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Employees", "employees.xlsx", "Excel (*.xlsx)"
+        )
+        if not path:
+            return
 
         with SessionLocal() as s:
             drop = {}
-            for r in s.query(DropdownOption).filter(DropdownOption.account_id == tenant_id()).all():
+            for r in (
+                s.query(DropdownOption)
+                .filter(DropdownOption.account_id == tenant_id())
+                .all()
+            ):
                 drop.setdefault(r.category, []).append(r.value)
-            emps = s.query(Employee).filter(Employee.account_id == tenant_id()).all()
-            groups = [g[0] for g in s.query(Holiday.group_code).filter(Holiday.account_id == tenant_id()).distinct().all()]
+            emps = (
+                s.query(Employee)
+                .filter(Employee.account_id == tenant_id())
+                .all()
+            )
+            groups = [
+                g[0]
+                for g in s.query(Holiday.group_code)
+                .filter(Holiday.account_id == tenant_id())
+                .distinct()
+                .all()
+            ]
         drop.setdefault("Holiday Group", groups)
         drop.setdefault("Employment Status", ["Active", "Non-Active"])
 
@@ -1029,50 +1254,114 @@ class EmployeeMainWidget(QWidget):
             drow += 1
 
         headers = [
-            "Employee Code", "Full Name", "Email", "Contact Number", "Address",
-            "ID Type", "ID Number", "Gender", "Date of Birth", "Race", "Country", "Residency", "PR Date",
-            "Employment Status", "Employment Pass", "Work Permit Number",
-            "Department", "Position", "Employment Type",
-            "Join Date", "Exit Date", "Holiday Group",
-            "Bank", "Account Number",
-            "Incentives", "Allowance", "Overtime Rate", "Part Time Rate", "Levy", "Basic Salary"
+            "Employee Code",
+            "Full Name",
+            "Email",
+            "Contact Number",
+            "Address",
+            "ID Type",
+            "ID Number",
+            "Gender",
+            "Date of Birth",
+            "Race",
+            "Country",
+            "Residency",
+            "PR Date",
+            "Employment Status",
+            "Employment Pass",
+            "Work Permit Number",
+            "Department",
+            "Position",
+            "Employment Type",
+            "Join Date",
+            "Exit Date",
+            "Holiday Group",
+            "Bank",
+            "Account Number",
+            "Incentives",
+            "Allowance",
+            "Overtime Rate",
+            "Part Time Rate",
+            "Levy",
+            "Basic Salary",
         ]
         ws.append(headers)
 
         for e in emps:
-            ws.append([
-                e.code or "", e.full_name or "", e.email or "", e.contact_number or "", e.address or "",
-                e.id_type or "", e.id_number or "", e.gender or "", _fmt_date(e.dob), e.race or "", e.country or "",
-                e.residency or "", _fmt_date(e.pr_date),
-                e.employment_status or "", e.employment_pass or "", e.work_permit_number or "",
-                getattr(e, "department", "") or "", e.position or "", e.employment_type or "",
-                _fmt_date(e.join_date), _fmt_date(e.exit_date), e.holiday_group or "",
-                e.bank or "", e.bank_account or "",
-                e.incentives or 0.0, e.allowance or 0.0, e.overtime_rate or 0.0, e.parttime_rate or 0.0, e.levy or 0.0,
-                e.basic_salary or 0.0
-            ])
+            ws.append(
+                [
+                    e.code or "",
+                    e.full_name or "",
+                    e.email or "",
+                    e.contact_number or "",
+                    e.address or "",
+                    e.id_type or "",
+                    e.id_number or "",
+                    e.gender or "",
+                    _fmt_date(e.dob),
+                    e.race or "",
+                    e.country or "",
+                    e.residency or "",
+                    _fmt_date(e.pr_date),
+                    e.employment_status or "",
+                    e.employment_pass or "",
+                    e.work_permit_number or "",
+                    getattr(e, "department", "") or "",
+                    e.position or "",
+                    e.employment_type or "",
+                    _fmt_date(e.join_date),
+                    _fmt_date(e.exit_date),
+                    e.holiday_group or "",
+                    e.bank or "",
+                    e.bank_account or "",
+                    e.incentives or 0.0,
+                    e.allowance or 0.0,
+                    e.overtime_rate or 0.0,
+                    e.parttime_rate or 0.0,
+                    e.levy or 0.0,
+                    e.basic_salary or 0.0,
+                ]
+            )
 
         col_index = {h: i + 1 for i, h in enumerate(headers)}
         dv_map = {
-            "ID Type": "ID Type", "Gender": "Gender", "Race": "Race", "Country": "Country",
-            "Residency": "Residency", "Employment Status": "Employment Status",
-            "Employment Pass": "Employment Pass", "Department": "Department",
-            "Position": "Position", "Employment Type": "Employment Type",
-            "Bank": "Bank", "Holiday Group": "Holiday Group",
+            "ID Type": "ID Type",
+            "Gender": "Gender",
+            "Race": "Race",
+            "Country": "Country",
+            "Residency": "Residency",
+            "Employment Status": "Employment Status",
+            "Employment Pass": "Employment Pass",
+            "Department": "Department",
+            "Position": "Position",
+            "Employment Type": "Employment Type",
+            "Bank": "Bank",
+            "Holiday Group": "Holiday Group",
         }
         cat_formula = {}
         for r in range(1, ws2.max_row + 1):
             cat = ws2.cell(r, 1).value
-            if not cat: continue
-            cat_formula[cat] = f'=OFFSET(Dropdowns!$B${r},0,0,1,COUNTA(Dropdowns!$B${r}:$ZZ${r}))'
+            if not cat:
+                continue
+            cat_formula[
+                cat
+            ] = f'=OFFSET(Dropdowns!$B${r},0,0,1,COUNTA(Dropdowns!$B${r}:$ZZ${r}))'
 
         max_rows = max(1000, ws.max_row + 100)
         for header, cat in dv_map.items():
-            if cat not in cat_formula or header not in col_index: continue
+            if cat not in cat_formula or header not in col_index:
+                continue
             c = col_index[header]
-            dv = DataValidation(type="list", formula1=cat_formula[cat], allow_blank=True, showDropDown=True)
+            dv = DataValidation(
+                type="list",
+                formula1=cat_formula[cat],
+                allow_blank=True,
+                showDropDown=True,
+            )
             ws.add_data_validation(dv)
-            dv.ranges.add(f"{ws.cell(2, c).coordinate}:{ws.cell(max_rows, c).coordinate}")
+            dv.ranges.add(
+                f"{ws.cell(2, c).coordinate}:{ws.cell(max_rows, c).coordinate}"
+            )
 
         ws.freeze_panes = "A2"
         try:
@@ -1088,7 +1377,9 @@ class EmployeeMainWidget(QWidget):
             QMessageBox.warning(self, "Import", "openpyxl not installed")
             return
 
-        path, _ = QFileDialog.getOpenFileName(self, "Import Employees", "", "Excel (*.xlsx)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Employees", "", "Excel (*.xlsx)"
+        )
         if not path:
             return
 
@@ -1114,7 +1405,9 @@ class EmployeeMainWidget(QWidget):
                 headers[key] = c
 
         if "full name" not in headers and "employee code" not in headers:
-            QMessageBox.warning(self, "Import", "Sheet needs 'Full Name' or 'Employee Code'.")
+            QMessageBox.warning(
+                self, "Import", "Sheet needs 'Full Name' or 'Employee Code'."
+            )
             return
 
         def gv(row, *names):
@@ -1135,7 +1428,11 @@ class EmployeeMainWidget(QWidget):
                 return None if x <= MIN_DATE else x
             if isinstance(x, (int, float)):
                 try:
-                    from openpyxl.utils.datetime import from_excel, CALENDAR_WINDOWS_1900 as CAL
+                    from openpyxl.utils.datetime import (
+                        from_excel,
+                        CALENDAR_WINDOWS_1900 as CAL,
+                    )
+
                     d = from_excel(x, CAL).date()
                     return None if d <= MIN_DATE else d
                 except Exception:
@@ -1144,12 +1441,22 @@ class EmployeeMainWidget(QWidget):
                 s = _clean_text(x)
                 if re.fullmatch(r"\d{1,6}", s):
                     try:
-                        from openpyxl.utils.datetime import from_excel, CALENDAR_WINDOWS_1900 as CAL
+                        from openpyxl.utils.datetime import (
+                            from_excel,
+                            CALENDAR_WINDOWS_1900 as CAL,
+                        )
+
                         d = from_excel(int(s), CAL).date()
                         return None if d <= MIN_DATE else d
                     except Exception:
                         pass
-                for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d", "%d.%m.%Y"):
+                for fmt in (
+                    "%Y-%m-%d",
+                    "%d-%m-%Y",
+                    "%d/%m/%Y",
+                    "%Y/%m/%d",
+                    "%d.%m.%Y",
+                ):
                     try:
                         d = datetime.strptime(s, fmt).date()
                         return None if d <= MIN_DATE else d
@@ -1173,19 +1480,25 @@ class EmployeeMainWidget(QWidget):
         with SessionLocal() as s:
             prefix, z = EMP_CODE_PREFIX, EMP_CODE_ZPAD
             existing_codes = [
-                c for (c,) in s.query(Employee.code)
-                .filter(Employee.account_id == tenant_id(),
-                        Employee.code.isnot(None),
-                        Employee.code.like(f"{prefix}%"))
+                c
+                for (c,) in s.query(Employee.code)
+                .filter(
+                    Employee.account_id == tenant_id(),
+                    Employee.code.isnot(None),
+                    Employee.code.like(f"{prefix}%"),
+                )
                 .all()
             ]
 
             def _num_tail(c):
-                if not c: return None
+                if not c:
+                    return None
                 m = re.search(r"(\d+)$", c)
                 return int(m.group(1)) if m else None
 
-            used_nums = {n for n in (_num_tail(c) for c in existing_codes) if n is not None}
+            used_nums = {
+                n for n in (_num_tail(c) for c in existing_codes) if n is not None
+            }
             cursor = max(used_nums) if used_nums else 0
 
             def next_code():
@@ -1196,7 +1509,10 @@ class EmployeeMainWidget(QWidget):
                 return code
 
             for r in range(2, ws.max_row + 1):
-                if not any((ws.cell(r, c).value not in (None, "", " ")) for c in range(1, ws.max_column + 1)):
+                if not any(
+                    (ws.cell(r, c).value not in (None, "", " "))
+                    for c in range(1, ws.max_column + 1)
+                ):
                     continue
 
                 code_raw = gv(r, "Employee Code", "code")
@@ -1208,7 +1524,9 @@ class EmployeeMainWidget(QWidget):
                 if not code and not full_name:
                     continue
 
-                q = s.query(Employee).filter(Employee.account_id == tenant_id())
+                q = s.query(Employee).filter(
+                    Employee.account_id == tenant_id()
+                )
                 e = None
                 if code:
                     e = q.filter(Employee.code == code).first()
@@ -1219,7 +1537,9 @@ class EmployeeMainWidget(QWidget):
                 if is_new:
                     if not code:
                         code = next_code()
-                    e = Employee(account_id=tenant_id(), code=code, full_name=full_name)
+                    e = Employee(
+                        account_id=tenant_id(), code=code, full_name=full_name
+                    )
                     s.add(e)
                 else:
                     if code and not (e.code or "").strip():
@@ -1228,7 +1548,9 @@ class EmployeeMainWidget(QWidget):
                         e.full_name = full_name
 
                 e.email = to_str(gv(r, "Email", "email"))
-                e.contact_number = to_str(gv(r, "Contact Number", "contact_number"))
+                e.contact_number = to_str(
+                    gv(r, "Contact Number", "contact_number")
+                )
                 e.address = to_str(gv(r, "Address", "address"))
                 e.id_type = to_str(gv(r, "ID Type", "id_type"))
                 e.id_number = to_str(gv(r, "ID Number", "id_number"))
@@ -1238,22 +1560,38 @@ class EmployeeMainWidget(QWidget):
                 e.country = to_str(gv(r, "Country", "country"))
                 e.residency = to_str(gv(r, "Residency", "residency"))
                 e.pr_date = to_date(gv(r, "PR Date", "pr_date"))
-                e.employment_status = to_str(gv(r, "Employment Status", "employment_status"))
-                e.employment_pass = to_str(gv(r, "Employment Pass", "employment_pass"))
-                e.work_permit_number = to_str(gv(r, "Work Permit Number", "work_permit_number"))
+                e.employment_status = to_str(
+                    gv(r, "Employment Status", "employment_status")
+                )
+                e.employment_pass = to_str(
+                    gv(r, "Employment Pass", "employment_pass")
+                )
+                e.work_permit_number = to_str(
+                    gv(r, "Work Permit Number", "work_permit_number")
+                )
                 e.department = to_str(gv(r, "Department", "department"))
                 e.position = to_str(gv(r, "Position", "position"))
-                e.employment_type = to_str(gv(r, "Employment Type", "employment_type"))
+                e.employment_type = to_str(
+                    gv(r, "Employment Type", "employment_type")
+                )
                 e.join_date = to_date(gv(r, "Join Date", "join_date"))
                 e.exit_date = to_date(gv(r, "Exit Date", "exit_date"))
-                e.holiday_group = to_str(gv(r, "Holiday Group", "holiday_group"))
+                e.holiday_group = to_str(
+                    gv(r, "Holiday Group", "holiday_group")
+                )
                 e.bank = to_str(gv(r, "Bank", "bank"))
-                e.bank_account = to_str(gv(r, "Account Number", "bank_account"))
+                e.bank_account = to_str(
+                    gv(r, "Account Number", "bank_account")
+                )
 
                 e.incentives = to_float(gv(r, "Incentives", "incentives"))
                 e.allowance = to_float(gv(r, "Allowance", "allowance"))
-                e.overtime_rate = to_float(gv(r, "Overtime Rate", "overtime_rate"))
-                e.parttime_rate = to_float(gv(r, "Part Time Rate", "parttime_rate"))
+                e.overtime_rate = to_float(
+                    gv(r, "Overtime Rate", "overtime_rate")
+                )
+                e.parttime_rate = to_float(
+                    gv(r, "Part Time Rate", "parttime_rate")
+                )
                 e.levy = to_float(gv(r, "Levy", "levy"))
                 b = gv(r, "Basic Salary", "basic_salary")
                 if b is not None:
@@ -1275,15 +1613,28 @@ class EmployeeMainWidget(QWidget):
             pass
         else:
             self._notify_employees_changed()
-        QMessageBox.information(self, "Import", f"Import complete. Created {created}, Updated {updated}.")
+        QMessageBox.information(
+            self,
+            "Import",
+            f"Import complete. Created {created}, Updated {updated}.",
+        )
 
     def _export_employees_template(self):
-        if Workbook is None or DataValidation is None or get_column_letter is None:
-            QMessageBox.warning(self, "Template", "openpyxl is required. Install 'openpyxl'.")
+        if (
+            Workbook is None
+            or DataValidation is None
+            or get_column_letter is None
+        ):
+            QMessageBox.warning(
+                self, "Template", "openpyxl is required. Install 'openpyxl'."
+            )
             return
 
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Employee Template", "employee_template.xlsx", "Excel Files (*.xlsx)"
+            self,
+            "Save Employee Template",
+            "employee_template.xlsx",
+            "Excel Files (*.xlsx)",
         )
         if not path:
             return
@@ -1293,25 +1644,60 @@ class EmployeeMainWidget(QWidget):
         ws.title = "Employees"
 
         headers = [
-            "Employee Code", "Full Name", "Email", "Contact Number", "Address",
-            "ID Type", "ID Number", "Gender", "Date of Birth", "Race", "Country", "Residency", "PR Date",
-            "Employment Status", "Employment Pass", "Work Permit Number",
-            "Department", "Position", "Employment Type",
-            "Join Date", "Exit Date", "Holiday Group",
-            "Bank", "Account Number",
-            "Incentives", "Allowance", "Overtime Rate", "Part Time Rate", "Levy", "Basic Salary"
+            "Employee Code",
+            "Full Name",
+            "Email",
+            "Contact Number",
+            "Address",
+            "ID Type",
+            "ID Number",
+            "Gender",
+            "Date of Birth",
+            "Race",
+            "Country",
+            "Residency",
+            "PR Date",
+            "Employment Status",
+            "Employment Pass",
+            "Work Permit Number",
+            "Department",
+            "Position",
+            "Employment Type",
+            "Join Date",
+            "Exit Date",
+            "Holiday Group",
+            "Bank",
+            "Account Number",
+            "Incentives",
+            "Allowance",
+            "Overtime Rate",
+            "Part Time Rate",
+            "Levy",
+            "Basic Salary",
         ]
         ws.append(headers)
 
         with SessionLocal() as s:
-            dropdowns = {c: [r.value for r in s.query(DropdownOption)
-                             .filter(DropdownOption.account_id == tenant_id(),
-                                     DropdownOption.category == c)
-                             .order_by(DropdownOption.value).all()]
-                         for c in MANAGED_CATEGORIES}
-            groups = [g[0] for g in s.query(Holiday.group_code)
-                      .filter(Holiday.account_id == tenant_id())
-                      .distinct().all()]
+            dropdowns = {
+                c: [
+                    r.value
+                    for r in s.query(DropdownOption)
+                    .filter(
+                        DropdownOption.account_id == tenant_id(),
+                        DropdownOption.category == c,
+                    )
+                    .order_by(DropdownOption.value)
+                    .all()
+                ]
+                for c in MANAGED_CATEGORIES
+            }
+            groups = [
+                g[0]
+                for g in s.query(Holiday.group_code)
+                .filter(Holiday.account_id == tenant_id())
+                .distinct()
+                .all()
+            ]
         dropdowns["Employment Status"] = ["Active", "Non-Active"]
         dropdowns["Holiday Group"] = groups
 
@@ -1326,7 +1712,8 @@ class EmployeeMainWidget(QWidget):
             col_idx += 1
 
         from openpyxl.utils import get_column_letter as _gcl
-        header_to_letter = {h: _gcl(i+1) for i, h in enumerate(headers)}
+
+        header_to_letter = {h: _gcl(i + 1) for i, h in enumerate(headers)}
 
         def add_validation(header_name: str, category: str):
             if category not in list_col_map:
@@ -1360,7 +1747,9 @@ class EmployeeMainWidget(QWidget):
             wb.save(path)
             QMessageBox.information(self, "Template", "Template saved.")
         except Exception as ex:
-            QMessageBox.warning(self, "Template", f"Failed to create template: {ex}")
+            QMessageBox.warning(
+                self, "Template", f"Failed to create template: {ex}"
+            )
 
     def _apply_id_format(self):
         global EMP_CODE_PREFIX, EMP_CODE_ZPAD
@@ -1369,12 +1758,18 @@ class EmployeeMainWidget(QWidget):
         self.id_preview.setText(f"Preview: {p}{1:0{z}d}")
 
         def extract_num(code: str):
-            if not code: return None
+            if not code:
+                return None
             m = re.search(r"(\d+)$", code)
             return int(m.group(1)) if m else None
 
         with SessionLocal() as s:
-            rows = s.query(Employee).filter(Employee.account_id == tenant_id()).order_by(Employee.id.asc()).all()
+            rows = (
+                s.query(Employee)
+                .filter(Employee.account_id == tenant_id())
+                .order_by(Employee.id.asc())
+                .all()
+            )
             used = set()
             next_seq = 1
             for e in rows:
@@ -1398,12 +1793,18 @@ class EmployeeMainWidget(QWidget):
         else:
             self._notify_employees_changed()
 
-        QMessageBox.information(self, "Employee Codes", "Codes updated.")
+        QMessageBox.information(
+            self, "Employee Codes", "Codes updated."
+        )
 
     # ----- XLSX helpers -----
     def _need_openpyxl(self) -> bool:
         if Workbook is None or load_workbook is None or DataValidation is None:
-            QMessageBox.warning(self, "XLSX", "openpyxl is required for XLSX. Install 'openpyxl' and retry.")
+            QMessageBox.warning(
+                self,
+                "XLSX",
+                "openpyxl is required for XLSX. Install 'openpyxl' and retry.",
+            )
             return True
         return False
 
@@ -1411,24 +1812,36 @@ class EmployeeMainWidget(QWidget):
         out: dict[str, list[str]] = {}
         with SessionLocal() as s:
             for cat in MANAGED_CATEGORIES:
-                vals = [r.value for r in s.query(DropdownOption)
-                        .filter(DropdownOption.account_id == tenant_id(),
-                                DropdownOption.category == cat)
-                        .order_by(DropdownOption.value).all()]
+                vals = [
+                    r.value
+                    for r in s.query(DropdownOption)
+                    .filter(
+                        DropdownOption.account_id == tenant_id(),
+                        DropdownOption.category == cat,
+                    )
+                    .order_by(DropdownOption.value)
+                    .all()
+                ]
                 out[cat] = vals or [""]
         return out
 
     def _next_employee_code(self, s) -> str:
         prefix, z = EMP_CODE_PREFIX, EMP_CODE_ZPAD
-        existing = [r.code for r in s.query(Employee)
-                    .filter(Employee.account_id == tenant_id()).all()
-                    if r.code and r.code.startswith(prefix)]
+        existing = [
+            r.code
+            for r in s.query(Employee)
+            .filter(Employee.account_id == tenant_id())
+            .all()
+            if r.code and r.code.startswith(prefix)
+        ]
         nums = []
         for c in existing:
             m = re.search(r"(\d+)$", c)
             if m:
-                try: nums.append(int(m.group(1)))
-                except: pass
+                try:
+                    nums.append(int(m.group(1)))
+                except Exception:
+                    pass
         nxt = (max(nums) + 1) if nums else 1
         return f"{prefix}{nxt:0{z}d}"
 
@@ -1451,7 +1864,9 @@ class EmployeeEditor(QDialog):
         self._build_schedule_tab()
         self._build_entitlement_tab()
 
-        bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, parent=self)
+        bb = QDialogButtonBox(
+            QDialogButtonBox.Save | QDialogButtonBox.Cancel, parent=self
+        )
         bb.accepted.connect(self._save)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
@@ -1469,7 +1884,14 @@ class EmployeeEditor(QDialog):
 
     # --- helpers ---
     def _set_all_fields_blank(self):
-        from PySide6.QtWidgets import QLineEdit, QComboBox, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox
+        from PySide6.QtWidgets import (
+            QLineEdit,
+            QComboBox,
+            QPlainTextEdit,
+            QTextEdit,
+            QSpinBox,
+            QDoubleSpinBox,
+        )
 
         def _blank_combo(cb: QComboBox):
             if not cb:
@@ -1479,9 +1901,18 @@ class EmployeeEditor(QDialog):
             cb.setCurrentIndex(0)
 
         for name in (
-                "full_name", "email", "contact", "address", "id_number",
-                "work_permit_number", "bank_account",
-                "incentives", "allowance", "ot_rate", "pt_rate", "levy"
+            "full_name",
+            "email",
+            "contact",
+            "address",
+            "id_number",
+            "work_permit_number",
+            "bank_account",
+            "incentives",
+            "allowance",
+            "ot_rate",
+            "pt_rate",
+            "levy",
         ):
             w = getattr(self, name, None)
             if isinstance(w, QLineEdit):
@@ -1499,9 +1930,17 @@ class EmployeeEditor(QDialog):
                     w.setValue(0)
 
         for name in (
-                "id_type", "gender", "race", "country", "residency",
-                "employment_pass", "department",
-                "position", "employment_type", "holiday_group", "bank"
+            "id_type",
+            "gender",
+            "race",
+            "country",
+            "residency",
+            "employment_pass",
+            "department",
+            "position",
+            "employment_type",
+            "holiday_group",
+            "bank",
         ):
             w = getattr(self, name, None)
             if isinstance(w, QComboBox):
@@ -1512,17 +1951,25 @@ class EmployeeEditor(QDialog):
 
     def _opts(self, category: str) -> list[str]:
         with SessionLocal() as s:
-            rows = s.query(DropdownOption)\
-                    .filter(DropdownOption.account_id == tenant_id(),
-                            DropdownOption.category == category)\
-                    .order_by(DropdownOption.value).all()
+            rows = (
+                s.query(DropdownOption)
+                .filter(
+                    DropdownOption.account_id == tenant_id(),
+                    DropdownOption.category == category,
+                )
+                .order_by(DropdownOption.value)
+                .all()
+            )
         return [r.value for r in rows]
 
     def _holiday_groups(self) -> list[str]:
         with SessionLocal() as s:
-            rows = s.query(Holiday.group_code)\
-                    .filter(Holiday.account_id == tenant_id())\
-                    .distinct().all()
+            rows = (
+                s.query(Holiday.group_code)
+                .filter(Holiday.account_id == tenant_id())
+                .distinct()
+                .all()
+            )
         return [r[0] for r in rows]
 
     def _set_combo_value(self, cb: QComboBox, value: str | None):
@@ -1546,23 +1993,37 @@ class EmployeeEditor(QDialog):
 
     # --- Personal ---
     def _build_personal_tab(self):
-        w = QWidget(); f = QFormLayout(w)
+        w = QWidget()
+        f = QFormLayout(w)
         self.full_name = QLineEdit()
         self.email = QLineEdit()
         self.contact = QLineEdit()
         self.address = QLineEdit()
-        self.id_type = QComboBox(); self.id_type.addItem(""); self.id_type.addItems(self._opts("ID Type"))
+        self.id_type = QComboBox()
+        self.id_type.addItem("")
+        self.id_type.addItems(self._opts("ID Type"))
         self.id_number = QLineEdit()
-        self.gender = QComboBox(); self.gender.addItem(""); self.gender.addItems(self._opts("Gender") or ["Male", "Female"])
+        self.gender = QComboBox()
+        self.gender.addItem("")
+        self.gender.addItems(self._opts("Gender") or ["Male", "Female"])
 
         # blankable dates with dd/MM/yyyy display and typing
         self.dob = BlankableDateEdit(display_fmt="dd/MM/yyyy")
         self.dob.dateChanged.connect(self._update_age)
 
         self.age_lbl = QLabel("-")
-        self.race = QComboBox(); self.race.addItem(""); self.race.addItems(self._opts("Race"))
-        self.country = QComboBox(); self.country.addItem(""); self.country.addItems(self._opts("Country"))
-        self.residency = QComboBox(); self.residency.addItem(""); self.residency.addItems(self._opts("Residency") or ["Citizen", "Permanent Resident", "Work Pass"])
+        self.race = QComboBox()
+        self.race.addItem("")
+        self.race.addItems(self._opts("Race"))
+        self.country = QComboBox()
+        self.country.addItem("")
+        self.country.addItems(self._opts("Country"))
+        self.residency = QComboBox()
+        self.residency.addItem("")
+        self.residency.addItems(
+            self._opts("Residency")
+            or ["Citizen", "Permanent Resident", "Work Pass"]
+        )
         self.residency.currentTextChanged.connect(self._toggle_pr_date)
 
         self.pr_date = BlankableDateEdit(display_fmt="dd/MM/yyyy")
@@ -1603,7 +2064,11 @@ class EmployeeEditor(QDialog):
     def _sync_status_from_exit(self):
         qd = self.exit_date
         today = QDate.currentDate()
-        is_blank = (qd.date_or_none() is None) if isinstance(qd, BlankableDateEdit) else False
+        is_blank = (
+            qd.date_or_none() is None
+            if isinstance(qd, BlankableDateEdit)
+            else False
+        )
         if is_blank:
             self.employment_status.setCurrentText("Active")
         else:
@@ -1622,24 +2087,35 @@ class EmployeeEditor(QDialog):
         self.employment_status.addItems(["Active", "Non-Active"])
         self.employment_pass = QComboBox()
         self.employment_pass.addItem("")
-        self.employment_pass.addItems(self._opts("Employment Pass") or ["None", "S Pass", "Work Permit"])
+        self.employment_pass.addItems(
+            self._opts("Employment Pass") or ["None", "S Pass", "Work Permit"]
+        )
         self.employment_pass.currentTextChanged.connect(self._toggle_wp)
         self.work_permit_number = QLineEdit()
         self.work_permit_number.setEnabled(False)
         self.department = QComboBox()
-        self.department.addItem(""); self.department.addItems(self._opts("Department"))
+        self.department.addItem("")
+        self.department.addItems(self._opts("Department"))
         self.position = QComboBox()
-        self.position.addItem(""); self.position.addItems(self._opts("Position"))
+        self.position.addItem("")
+        self.position.addItems(self._opts("Position"))
         self.employment_type = QComboBox()
-        self.employment_type.addItem(""); self.employment_type.addItems(self._opts("Employment Type") or ["Full-Time", "Part-Time", "Contract"])
+        self.employment_type.addItem("")
+        self.employment_type.addItems(
+            self._opts("Employment Type")
+            or ["Full-Time", "Part-Time", "Contract"]
+        )
 
         # blankable join and exit dates with dd/MM/yyyy
         self.join_date = BlankableDateEdit(display_fmt="dd/MM/yyyy")
         self.exit_date = BlankableDateEdit(display_fmt="dd/MM/yyyy")
-        self.exit_date.dateChanged.connect(lambda _d: self._sync_status_from_exit())
+        self.exit_date.dateChanged.connect(
+            lambda _d: self._sync_status_from_exit()
+        )
 
         self.holiday_group = QComboBox()
-        self.holiday_group.addItem(""); self.holiday_group.addItems(self._holiday_groups())
+        self.holiday_group.addItem("")
+        self.holiday_group.addItems(self._holiday_groups())
 
         f.addRow("Employment Status", self.employment_status)
         f.addRow("Employment Pass", self.employment_pass)
@@ -1653,12 +2129,17 @@ class EmployeeEditor(QDialog):
         self.tabs.addTab(w, "Employment")
 
     def _toggle_wp(self, txt: str):
-        self.work_permit_number.setEnabled(txt in ("Work Permit", "S Pass"))
+        self.work_permit_number.setEnabled(
+            txt in ("Work Permit", "S Pass")
+        )
 
     # --- Payment ---
     def _build_payment_tab(self):
-        w = QWidget(); f = QFormLayout(w)
-        self.bank = QComboBox(); self.bank.addItem(""); self.bank.addItems(self._opts("Bank"))
+        w = QWidget()
+        f = QFormLayout(w)
+        self.bank = QComboBox()
+        self.bank.addItem("")
+        self.bank.addItems(self._opts("Bank"))
         self.bank_account = QLineEdit()
         f.addRow("Bank", self.bank)
         f.addRow("Account Number", self.bank_account)
@@ -1666,7 +2147,8 @@ class EmployeeEditor(QDialog):
 
     # --- Remuneration ---
     def _build_remuneration_tab(self):
-        w = QWidget(); v = QVBoxLayout(w)
+        w = QWidget()
+        v = QVBoxLayout(w)
 
         grid = QGridLayout()
         self.incentives = QLineEdit("0")
@@ -1675,22 +2157,39 @@ class EmployeeEditor(QDialog):
         self.pt_rate = QLineEdit("0")
         self.levy = QLineEdit("0")
         self.basic_salary_lbl = QLabel("0.00")
-        grid.addWidget(QLabel("Basic Salary (auto)"), 0, 0); grid.addWidget(self.basic_salary_lbl, 0, 1)
-        grid.addWidget(QLabel("Incentives"), 1, 0); grid.addWidget(self.incentives, 1, 1)
-        grid.addWidget(QLabel("Allowance"), 2, 0); grid.addWidget(self.allowance, 2, 1)
-        grid.addWidget(QLabel("Overtime Rate"), 3, 0); grid.addWidget(self.ot_rate, 3, 1)
-        grid.addWidget(QLabel("Part Time Rate"), 4, 0); grid.addWidget(self.pt_rate, 4, 1)
-        grid.addWidget(QLabel("Levy"), 5, 0); grid.addWidget(self.levy, 5, 1)
+        grid.addWidget(QLabel("Basic Salary (auto)"), 0, 0)
+        grid.addWidget(self.basic_salary_lbl, 0, 1)
+        grid.addWidget(QLabel("Incentives"), 1, 0)
+        grid.addWidget(self.incentives, 1, 1)
+        grid.addWidget(QLabel("Allowance"), 2, 0)
+        grid.addWidget(self.allowance, 2, 1)
+        grid.addWidget(QLabel("Overtime Rate"), 3, 0)
+        grid.addWidget(self.ot_rate, 3, 1)
+        grid.addWidget(QLabel("Part Time Rate"), 4, 0)
+        grid.addWidget(self.pt_rate, 4, 1)
+        grid.addWidget(QLabel("Levy"), 5, 0)
+        grid.addWidget(self.levy, 5, 1)
         v.addLayout(grid)
 
         self.salary_tbl = QTableWidget(0, 3)
-        self.salary_tbl.setHorizontalHeaderLabels(["Amount", "Start Date", "End Date"])
+        self.salary_tbl.setHorizontalHeaderLabels(
+            ["Amount", "Start Date", "End Date"]
+        )
         self.salary_tbl.horizontalHeader().setStretchLastSection(True)
 
         btn_row = QHBoxLayout()
-        add = QPushButton("Add Row"); add.clicked.connect(lambda: self._row_add(self.salary_tbl, ["0.00", date.today().strftime("%Y-%m-%d"), ""]))
-        rm = QPushButton("Delete Row"); rm.clicked.connect(lambda: self._row_del(self.salary_tbl))
-        btn_row.addWidget(add); btn_row.addWidget(rm); btn_row.addStretch(1)
+        add = QPushButton("Add Row")
+        add.clicked.connect(
+            lambda: self._row_add(
+                self.salary_tbl,
+                ["0.00", date.today().strftime("%Y-%m-%d"), ""],
+            )
+        )
+        rm = QPushButton("Delete Row")
+        rm.clicked.connect(lambda: self._row_del(self.salary_tbl))
+        btn_row.addWidget(add)
+        btn_row.addWidget(rm)
+        btn_row.addStretch(1)
 
         v.addWidget(QLabel("Salary History"))
         v.addLayout(btn_row)
@@ -1700,34 +2199,52 @@ class EmployeeEditor(QDialog):
 
     # --- Work schedule ---
     def _build_schedule_tab(self):
-        w = QWidget(); v = QVBoxLayout(w)
+        w = QWidget()
+        v = QVBoxLayout(w)
         self.ws_tbl = QTableWidget(7, 3)
         self.ws_tbl.setHorizontalHeaderLabels(["Day", "Working", "Day Type"])
-        days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        days = [
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+        ]
         for i, d in enumerate(days):
             self.ws_tbl.setItem(i, 0, QTableWidgetItem(d))
-            chk = QCheckBox(); chk.setChecked(True); self.ws_tbl.setCellWidget(i, 1, chk)
-            typ = QComboBox(); typ.addItems(["Full", "Half"]); self.ws_tbl.setCellWidget(i, 2, typ)
+            chk = QCheckBox()
+            chk.setChecked(True)
+            self.ws_tbl.setCellWidget(i, 1, chk)
+            typ = QComboBox()
+            typ.addItems(["Full", "Half"])
+            self.ws_tbl.setCellWidget(i, 2, typ)
         self.ws_tbl.horizontalHeader().setStretchLastSection(True)
         v.addWidget(self.ws_tbl)
         self.tabs.addTab(w, "Work Schedule")
 
     # --- Leave entitlement ---
     def _build_entitlement_tab(self):
-        w = QWidget(); v = QVBoxLayout(w)
+        w = QWidget()
+        v = QVBoxLayout(w)
 
         top = QHBoxLayout()
         self.ent_leave_types = self._load_leave_types()
         self.ent_tbl = QTableWidget(50, max(1, len(self.ent_leave_types)))
         headers = [f"Year {i}" for i in range(1, 51)]
         self.ent_tbl.setVerticalHeaderLabels(headers)
-        self.ent_tbl.setHorizontalHeaderLabels(self.ent_leave_types or ["Leave"])
+        self.ent_tbl.setHorizontalHeaderLabels(
+            self.ent_leave_types or ["Leave"]
+        )
         for r in range(50):
             for c in range(max(1, len(self.ent_leave_types))):
                 self.ent_tbl.setItem(r, c, QTableWidgetItem("0"))
 
-        load_def = QPushButton("Load Default Leave Values"); load_def.clicked.connect(self._load_defaults_into_entitlements)
-        top.addWidget(load_def); top.addStretch(1)
+        load_def = QPushButton("Load Default Leave Values")
+        load_def.clicked.connect(self._load_defaults_into_entitlements)
+        top.addWidget(load_def)
+        top.addStretch(1)
         v.addLayout(top)
         v.addWidget(self.ent_tbl, 1)
         self.tabs.addTab(w, "Leave Entitlement")
@@ -1747,7 +2264,9 @@ class EmployeeEditor(QDialog):
             self._set_combo_value(self.gender, e.gender)
 
             if e.dob:
-                self.dob.set_real_date(QDate(e.dob.year, e.dob.month, e.dob.day))
+                self.dob.set_real_date(
+                    QDate(e.dob.year, e.dob.month, e.dob.day)
+                )
                 self._update_age()
             else:
                 self.dob.clear()
@@ -1757,13 +2276,17 @@ class EmployeeEditor(QDialog):
             self._set_combo_value(self.residency, e.residency)
             self._toggle_pr_date(self.residency.currentText())
             if e.pr_date:
-                self.pr_date.set_real_date(QDate(e.pr_date.year, e.pr_date.month, e.pr_date.day))
+                self.pr_date.set_real_date(
+                    QDate(e.pr_date.year, e.pr_date.month, e.pr_date.day)
+                )
             else:
                 self.pr_date.clear()
 
             # Employment
             # keep default behaviour for status via exit-date rule
-            self.employment_status.setCurrentText(e.employment_status or "Active")
+            self.employment_status.setCurrentText(
+                e.employment_status or "Active"
+            )
             self._set_combo_value(self.employment_pass, e.employment_pass)
             self._toggle_wp(self.employment_pass.currentText())
             self.work_permit_number.setText(e.work_permit_number or "")
@@ -1772,12 +2295,16 @@ class EmployeeEditor(QDialog):
             self._set_combo_value(self.employment_type, e.employment_type)
 
             if e.join_date:
-                self.join_date.set_real_date(QDate(e.join_date.year, e.join_date.month, e.join_date.day))
+                self.join_date.set_real_date(
+                    QDate(e.join_date.year, e.join_date.month, e.join_date.day)
+                )
             else:
                 self.join_date.clear()
 
             if e.exit_date:
-                self.exit_date.set_real_date(QDate(e.exit_date.year, e.exit_date.month, e.exit_date.day))
+                self.exit_date.set_real_date(
+                    QDate(e.exit_date.year, e.exit_date.month, e.exit_date.day)
+                )
             else:
                 self.exit_date.clear()
             self._sync_status_from_exit()
@@ -1794,7 +2321,9 @@ class EmployeeEditor(QDialog):
             self.ot_rate.setText(str(e.overtime_rate or 0))
             self.pt_rate.setText(str(e.parttime_rate or 0))
             self.levy.setText(str(e.levy or 0))
-            self.basic_salary_lbl.setText(f"{(e.basic_salary or 0.0):.2f}")
+            self.basic_salary_lbl.setText(
+                f"{(e.basic_salary or 0.0):.2f}"
+            )
 
             # Salary history
             self.salary_tbl.setRowCount(0)
@@ -1807,14 +2336,35 @@ class EmployeeEditor(QDialog):
             for row in sh:
                 r = self.salary_tbl.rowCount()
                 self.salary_tbl.insertRow(r)
-                self.salary_tbl.setItem(r, 0, QTableWidgetItem(f"{(row.amount or 0.0):.2f}"))
-                self.salary_tbl.setItem(r, 1,
-                                        QTableWidgetItem(row.start_date.strftime("%Y-%m-%d") if row.start_date else ""))
-                self.salary_tbl.setItem(r, 2,
-                                        QTableWidgetItem(row.end_date.strftime("%Y-%m-%d") if row.end_date else ""))
+                self.salary_tbl.setItem(
+                    r, 0, QTableWidgetItem(f"{(row.amount or 0.0):.2f}")
+                )
+                self.salary_tbl.setItem(
+                    r,
+                    1,
+                    QTableWidgetItem(
+                        row.start_date.strftime("%Y-%m-%d")
+                        if row.start_date
+                        else ""
+                    ),
+                )
+                self.salary_tbl.setItem(
+                    r,
+                    2,
+                    QTableWidgetItem(
+                        row.end_date.strftime("%Y-%m-%d")
+                        if row.end_date
+                        else ""
+                    ),
+                )
 
             # Work schedule
-            ws = {d.weekday: d for d in s.query(WorkScheduleDay).filter(WorkScheduleDay.employee_id == emp_id).all()}
+            ws = {
+                d.weekday: d
+                for d in s.query(WorkScheduleDay)
+                .filter(WorkScheduleDay.employee_id == emp_id)
+                .all()
+            }
             for i in range(7):
                 chk: QCheckBox = self.ws_tbl.cellWidget(i, 1)
                 cmb: QComboBox = self.ws_tbl.cellWidget(i, 2)
@@ -1826,43 +2376,75 @@ class EmployeeEditor(QDialog):
                     cmb.setCurrentText("Full")
 
             # Entitlements
-            ents = s.query(LeaveEntitlement).filter(LeaveEntitlement.employee_id == emp_id).all()
-            types = sorted({row.leave_type for row in ents}) or getattr(self, "ent_leave_types", [])
+            ents = (
+                s.query(LeaveEntitlement)
+                .filter(LeaveEntitlement.employee_id == emp_id)
+                .all()
+            )
+            types = sorted({row.leave_type for row in ents}) or getattr(
+                self, "ent_leave_types", []
+            )
             self.ent_leave_types = list(types) if types else ["Leave"]
             self.ent_tbl.setColumnCount(len(self.ent_leave_types))
             self.ent_tbl.setHorizontalHeaderLabels(self.ent_leave_types)
-            grid = {(r.year_of_service, r.leave_type): r.days for r in ents}
+            grid = {
+                (r.year_of_service, r.leave_type): r.days for r in ents
+            }
             for r in range(50):
                 for c, t in enumerate(self.ent_leave_types):
                     val = grid.get((r + 1, t), 0)
-                    self.ent_tbl.setItem(r, c, QTableWidgetItem(str(val)))
+                    self.ent_tbl.setItem(
+                        r, c, QTableWidgetItem(str(val))
+                    )
 
     def _load_leave_types(self) -> list[str]:
         # combine types from LeaveDefault AND existing per-employee entitlements (tenant-scoped), de-duped case-insensitively
         out = []
         seen = set()
         with SessionLocal() as s:
-            for (t,) in s.query(LeaveDefault.leave_type).filter(LeaveDefault.account_id == tenant_id()).distinct().all():
+            for (t,) in (
+                s.query(LeaveDefault.leave_type)
+                .filter(LeaveDefault.account_id == tenant_id())
+                .distinct()
+                .all()
+            ):
                 k = (t or "").strip().casefold()
                 if k and k not in seen:
-                    seen.add(k); out.append(t)
-            for (t,) in s.query(LeaveEntitlement.leave_type).filter(LeaveEntitlement.account_id == tenant_id()).distinct().all():
+                    seen.add(k)
+                    out.append(t)
+            for (t,) in (
+                s.query(LeaveEntitlement.leave_type)
+                .filter(LeaveEntitlement.account_id == tenant_id())
+                .distinct()
+                .all()
+            ):
                 k = (t or "").strip().casefold()
                 if k and k not in seen:
-                    seen.add(k); out.append(t)
+                    seen.add(k)
+                    out.append(t)
         return out or ["Annual Leave"]
 
     def _load_defaults_into_entitlements(self):
         with SessionLocal() as s:
-            rows = s.query(LeaveDefault).filter(LeaveDefault.account_id == tenant_id()).all()
-            raw = {d.leave_type: json.loads(d.table_json or "{}") for d in rows}
+            rows = (
+                s.query(LeaveDefault)
+                .filter(LeaveDefault.account_id == tenant_id())
+                .all()
+            )
+            raw = {
+                d.leave_type: json.loads(d.table_json or "{}") for d in rows
+            }
         if not raw:
-            QMessageBox.information(self, "Leave Defaults", "No defaults defined.")
+            QMessageBox.information(
+                self, "Leave Defaults", "No defaults defined."
+            )
             return
 
         years_map: dict[str, dict[str, int]] = {}
         for lt, blob in raw.items():
-            if isinstance(blob, dict) and "years" in blob and isinstance(blob["years"], dict):
+            if isinstance(blob, dict) and "years" in blob and isinstance(
+                blob["years"], dict
+            ):
                 years_map[lt] = {k: int(v) for k, v in blob["years"].items()}
             elif isinstance(blob, dict):
                 years_map[lt] = {k: int(v) for k, v in blob.items()}
@@ -1880,14 +2462,16 @@ class EmployeeEditor(QDialog):
 
     # --- utils ---
     def _row_add(self, tbl: QTableWidget, values: list[str] | None = None):
-        r = tbl.rowCount(); tbl.insertRow(r)
+        r = tbl.rowCount()
+        tbl.insertRow(r)
         vals = values or ["", "", ""]
         for c, v in enumerate(vals):
             tbl.setItem(r, c, QTableWidgetItem(v))
 
     def _row_del(self, tbl: QTableWidget):
         rows = sorted({i.row() for i in tbl.selectedIndexes()}, reverse=True)
-        for r in rows: tbl.removeRow(r)
+        for r in rows:
+            tbl.removeRow(r)
 
 
 # ---- Dropdown Options dialog ----
@@ -1898,12 +2482,22 @@ class DropdownOptionsDialog(QDialog):
         v = QVBoxLayout(self)
 
         top = QHBoxLayout()
-        self.cat = QComboBox(); self.cat.addItems(MANAGED_CATEGORIES)
+        self.cat = QComboBox()
+        self.cat.addItems(MANAGED_CATEGORIES)
         self.cat.currentTextChanged.connect(self._reload_values)
-        btn_add_val = QPushButton("Add"); btn_add_val.clicked.connect(self._add_value)
-        btn_rename_val = QPushButton("Rename"); btn_rename_val.clicked.connect(self._rename_value)
-        btn_del_val = QPushButton("Delete"); btn_del_val.clicked.connect(self._delete_values)
-        for w in (QLabel("Category"), self.cat, btn_add_val, btn_rename_val, btn_del_val):
+        btn_add_val = QPushButton("Add")
+        btn_add_val.clicked.connect(self._add_value)
+        btn_rename_val = QPushButton("Rename")
+        btn_rename_val.clicked.connect(self._rename_value)
+        btn_del_val = QPushButton("Delete")
+        btn_del_val.clicked.connect(self._delete_values)
+        for w in (
+            QLabel("Category"),
+            self.cat,
+            btn_add_val,
+            btn_rename_val,
+            btn_del_val,
+        ):
             top.addWidget(w)
         v.addLayout(top)
 
@@ -1913,62 +2507,98 @@ class DropdownOptionsDialog(QDialog):
         self._reload_values(self.cat.currentText())
 
         bb = QDialogButtonBox(QDialogButtonBox.Close)
-        bb.rejected.connect(self.reject); bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        bb.accepted.connect(self.accept)
         v.addWidget(bb)
 
     def _reload_values(self, category: str):
         self.val_list.clear()
         _ensure_dropdown_defaults(category)
         with SessionLocal() as s:
-            rows = s.query(DropdownOption)\
-                    .filter(DropdownOption.account_id == tenant_id(),
-                            DropdownOption.category == category)\
-                    .order_by(DropdownOption.value).all()
+            rows = (
+                s.query(DropdownOption)
+                .filter(
+                    DropdownOption.account_id == tenant_id(),
+                    DropdownOption.category == category,
+                )
+                .order_by(DropdownOption.value)
+                .all()
+            )
         for r in rows:
             QListWidgetItem(r.value, self.val_list)
 
     def _add_value(self):
         cat = self.cat.currentText()
         txt, ok = self._prompt("Add value", "Value")
-        if not ok or not txt.strip(): return
+        if not ok or not txt.strip():
+            return
         txt = _clean_text(txt)
         with SessionLocal() as s:
-            exists = s.query(DropdownOption).filter(
-                DropdownOption.account_id == tenant_id(),
-                DropdownOption.category == cat,
-                DropdownOption.value == txt.strip()
-            ).first()
+            exists = (
+                s.query(DropdownOption)
+                .filter(
+                    DropdownOption.account_id == tenant_id(),
+                    DropdownOption.category == cat,
+                    DropdownOption.value == txt.strip(),
+                )
+                .first()
+            )
             if exists:
-                QMessageBox.information(self, "Dropdown", "Value already exists."); return
-            s.add(DropdownOption(account_id=tenant_id(), category=cat, value=txt.strip()))
+                QMessageBox.information(
+                    self, "Dropdown", "Value already exists."
+                )
+                return
+            s.add(
+                DropdownOption(
+                    account_id=tenant_id(),
+                    category=cat,
+                    value=txt.strip(),
+                )
+            )
             s.commit()
         self._reload_values(cat)
 
     def _rename_value(self):
         cat = self.cat.currentText()
         it = self.val_list.currentItem()
-        if not it: return
+        if not it:
+            return
         old = it.text()
         if old in DEFAULT_DROPDOWN_OPTIONS.get(cat, []):
-            QMessageBox.information(self, "Dropdown", "Default values cannot be renamed.")
+            QMessageBox.information(
+                self, "Dropdown", "Default values cannot be renamed."
+            )
             return
         new, ok = self._prompt("Rename value", "New value", old)
-        if not ok or not new.strip() or new.strip() == old: return
+        if not ok or not new.strip() or new.strip() == old:
+            return
         new = _clean_text(new)
         with SessionLocal() as s:
-            row = s.query(DropdownOption).filter(
-                DropdownOption.account_id == tenant_id(),
-                DropdownOption.category == cat,
-                DropdownOption.value == old
-            ).first()
-            if not row: return
-            exists = s.query(DropdownOption).filter(
-                DropdownOption.account_id == tenant_id(),
-                DropdownOption.category == cat,
-                DropdownOption.value == new.strip()
-            ).first()
+            row = (
+                s.query(DropdownOption)
+                .filter(
+                    DropdownOption.account_id == tenant_id(),
+                    DropdownOption.category == cat,
+                    DropdownOption.value == old,
+                )
+                .first()
+            )
+            if not row:
+                return
+            exists = (
+                s.query(DropdownOption)
+                .filter(
+                    DropdownOption.account_id == tenant_id(),
+                    DropdownOption.category == cat,
+                    DropdownOption.value == new.strip(),
+                )
+                .first()
+            )
             if exists:
-                QMessageBox.information(self, "Dropdown", "Target value already exists."); return
+                QMessageBox.information(
+                    self, "Dropdown", "Target value already exists."
+                )
+                return
             row.value = new.strip()
             s.commit()
         self._reload_values(cat)
@@ -1976,28 +2606,36 @@ class DropdownOptionsDialog(QDialog):
     def _delete_values(self):
         cat = self.cat.currentText()
         items = self.val_list.selectedItems()
-        if not items: return
+        if not items:
+            return
         protected = set(DEFAULT_DROPDOWN_OPTIONS.get(cat, []))
         blocked = [i.text() for i in items if i.text() in protected]
         if blocked:
             QMessageBox.information(
                 self,
                 "Dropdown",
-                "Default values cannot be deleted:\n- " + "\n- ".join(blocked),
+                "Default values cannot be deleted:\n- "
+                + "\n- ".join(blocked),
             )
         vals = [i.text() for i in items if i.text() not in protected]
         if not vals:
             return
-        if QMessageBox.question(self, "Dropdown", f"Delete {len(vals)} selected value(s)?") != QMessageBox.Yes:
+        if (
+            QMessageBox.question(
+                self, "Dropdown", f"Delete {len(vals)} selected value(s)?"
+            )
+            != QMessageBox.Yes
+        ):
             return
         with SessionLocal() as s:
             for v in vals:
                 q = s.query(DropdownOption).filter(
                     DropdownOption.account_id == tenant_id(),
                     DropdownOption.category == cat,
-                    DropdownOption.value == v
+                    DropdownOption.value == v,
                 )
-                for d in q.all(): s.delete(d)
+                for d in q.all():
+                    s.delete(d)
             s.commit()
         self._reload_values(cat)
 
@@ -2006,13 +2644,17 @@ class DropdownOptionsDialog(QDialog):
         dlg.setWindowTitle(title)
         lay = QVBoxLayout(dlg)
         inp = QLineEdit(value)
-        fl = QFormLayout(); fl.addRow(label, inp); lay.addLayout(fl)
+        fl = QFormLayout()
+        fl.addRow(label, inp)
+        lay.addLayout(fl)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         lay.addWidget(bb)
-        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
         if dlg.exec() == QDialog.Accepted:
             return inp.text(), True
         return "", False
+
 
 # ---- Leave Defaults dialog ----
 class LeaveDefaultsDialog(QDialog):
@@ -2030,6 +2672,7 @@ class LeaveDefaultsDialog(QDialog):
         }
     Backward compatible with old table_json that was a plain {"1": days,...}.
     """
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Leave Defaults")
@@ -2045,11 +2688,18 @@ class LeaveDefaultsDialog(QDialog):
         left.addWidget(self.type_list, 1)
 
         btns = QHBoxLayout()
-        add = QPushButton("Add Type"); add.clicked.connect(self._add_type)
-        ren = QPushButton("Rename"); ren.clicked.connect(self._rename_type)
-        rm  = QPushButton("Delete"); rm.clicked.connect(self._delete_type)
-        for b in (add, ren, rm): b.setMaximumWidth(120)
-        btns.addWidget(add); btns.addWidget(ren); btns.addWidget(rm); btns.addStretch(1)
+        add = QPushButton("Add Type")
+        add.clicked.connect(self._add_type)
+        ren = QPushButton("Rename")
+        ren.clicked.connect(self._rename_type)
+        rm = QPushButton("Delete")
+        rm.clicked.connect(self._delete_type)
+        for b in (add, ren, rm):
+            b.setMaximumWidth(120)
+        btns.addWidget(add)
+        btns.addWidget(ren)
+        btns.addWidget(rm)
+        btns.addStretch(1)
         left.addLayout(btns)
 
         # right: settings + table
@@ -2057,18 +2707,24 @@ class LeaveDefaultsDialog(QDialog):
 
         top = QHBoxLayout()
         self.lbl_curr = QLabel("—")
-        top.addWidget(QLabel("Selected:")); top.addWidget(self.lbl_curr); top.addStretch(1)
+        top.addWidget(QLabel("Selected:"))
+        top.addWidget(self.lbl_curr)
+        top.addStretch(1)
         right.addLayout(top)
 
         # --- settings row ---
         meta1 = QHBoxLayout()
-        self.prorated = QComboBox(); self.prorated.addItems(["False", "True"])
-        meta1.addWidget(QLabel("Pro-rated?")); meta1.addWidget(self.prorated)
+        self.prorated = QComboBox()
+        self.prorated.addItems(["False", "True"])
+        meta1.addWidget(QLabel("Pro-rated?"))
+        meta1.addWidget(self.prorated)
         meta1.addSpacing(24)
 
-        self.carry_policy = QComboBox(); self.carry_policy.addItems(["Reset", "Bring forward"])
+        self.carry_policy = QComboBox()
+        self.carry_policy.addItems(["Reset", "Bring forward"])
         self.carry_policy.currentTextChanged.connect(self._toggle_carry_ui)
-        meta1.addWidget(QLabel("Year-end handling")); meta1.addWidget(self.carry_policy)
+        meta1.addWidget(QLabel("Year-end handling"))
+        meta1.addWidget(self.carry_policy)
         meta1.addStretch(1)
         right.addLayout(meta1)
 
@@ -2090,13 +2746,17 @@ class LeaveDefaultsDialog(QDialog):
         for i in range(50):
             self.tbl.setItem(i, 0, QTableWidgetItem(str(i + 1)))
             self.tbl.setItem(i, 1, QTableWidgetItem("14"))
-        self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.tbl.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeToContents
+        )
         right.addWidget(self.tbl, 1)
 
         save_row = QHBoxLayout()
-        save = QPushButton("Save"); save.clicked.connect(self._save_current)
+        save = QPushButton("Save")
+        save.clicked.connect(self._save_current)
         save.setMaximumWidth(120)
-        save_row.addWidget(save); save_row.addStretch(1)
+        save_row.addWidget(save)
+        save_row.addStretch(1)
         right.addLayout(save_row)
 
         root.addLayout(left, 1)
@@ -2106,16 +2766,22 @@ class LeaveDefaultsDialog(QDialog):
         self._toggle_carry_ui()
 
     def _toggle_carry_ui(self):
-        bring = (self.carry_policy.currentText() == "Bring forward")
+        bring = self.carry_policy.currentText() == "Bring forward"
         self.carry_limit_enable.setEnabled(bring)
-        self.carry_limit.setEnabled(bring and self.carry_limit_enable.isChecked())
+        self.carry_limit.setEnabled(
+            bring and self.carry_limit_enable.isChecked()
+        )
 
     def _load_types(self):
         self.type_list.clear()
         with SessionLocal() as s:
-            rows = s.query(LeaveDefault.leave_type)\
-                    .filter(LeaveDefault.account_id == tenant_id())\
-                    .distinct().order_by(LeaveDefault.leave_type).all()
+            rows = (
+                s.query(LeaveDefault.leave_type)
+                .filter(LeaveDefault.account_id == tenant_id())
+                .distinct()
+                .order_by(LeaveDefault.leave_type)
+                .all()
+            )
         for (t,) in rows:
             self.type_list.addItem(t)
         if self.type_list.count() == 0:
@@ -2125,18 +2791,32 @@ class LeaveDefaultsDialog(QDialog):
 
     def _ensure_row(self, leave_type: str):
         with SessionLocal() as s:
-            row = s.query(LeaveDefault)\
-                   .filter(LeaveDefault.account_id == tenant_id(),
-                           LeaveDefault.leave_type == leave_type)\
-                   .first()
+            row = (
+                s.query(LeaveDefault)
+                .filter(
+                    LeaveDefault.account_id == tenant_id(),
+                    LeaveDefault.leave_type == leave_type,
+                )
+                .first()
+            )
             if not row:
                 years = {str(i + 1): 14 for i in range(50)}
-                meta = {"carry_policy": "reset", "carry_limit_enabled": False, "carry_limit": 0.0}
-                s.add(LeaveDefault(
-                    account_id=tenant_id(), leave_type=leave_type,
-                    prorated=False, yearly_reset=True,
-                    table_json=json.dumps({"years": years, "_meta": meta})
-                ))
+                meta = {
+                    "carry_policy": "reset",
+                    "carry_limit_enabled": False,
+                    "carry_limit": 0.0,
+                }
+                s.add(
+                    LeaveDefault(
+                        account_id=tenant_id(),
+                        leave_type=leave_type,
+                        prorated=False,
+                        yearly_reset=True,
+                        table_json=json.dumps(
+                            {"years": years, "_meta": meta}
+                        ),
+                    )
+                )
                 s.commit()
 
     def _on_type_changed(self, curr, _prev):
@@ -2145,15 +2825,25 @@ class LeaveDefaultsDialog(QDialog):
         typ = curr.text()
         self.lbl_curr.setText(typ)
         with SessionLocal() as s:
-            row = s.query(LeaveDefault)\
-                   .filter(LeaveDefault.account_id == tenant_id(),
-                           LeaveDefault.leave_type == typ).first()
+            row = (
+                s.query(LeaveDefault)
+                .filter(
+                    LeaveDefault.account_id == tenant_id(),
+                    LeaveDefault.leave_type == typ,
+                )
+                .first()
+            )
         if not row:
             self._ensure_row(typ)
             with SessionLocal() as s:
-                row = s.query(LeaveDefault)\
-                       .filter(LeaveDefault.account_id == tenant_id(),
-                               LeaveDefault.leave_type == typ).first()
+                row = (
+                    s.query(LeaveDefault)
+                    .filter(
+                        LeaveDefault.account_id == tenant_id(),
+                        LeaveDefault.leave_type == typ,
+                    )
+                    .first()
+                )
 
         self.prorated.setCurrentText("True" if row.prorated else "False")
 
@@ -2170,20 +2860,31 @@ class LeaveDefaultsDialog(QDialog):
             meta = {}
 
         carry_policy = meta.get("carry_policy", "reset")
-        self.carry_policy.setCurrentText("Bring forward" if carry_policy == "bring" else "Reset")
-        self.carry_limit_enable.setChecked(bool(meta.get("carry_limit_enabled", False)))
+        self.carry_policy.setCurrentText(
+            "Bring forward" if carry_policy == "bring" else "Reset"
+        )
+        self.carry_limit_enable.setChecked(
+            bool(meta.get("carry_limit_enabled", False))
+        )
         try:
-            self.carry_limit.setValue(float(meta.get("carry_limit", 0.0)))
+            self.carry_limit.setValue(
+                float(meta.get("carry_limit", 0.0))
+            )
         except Exception:
             self.carry_limit.setValue(0.0)
 
-        row.yearly_reset = (carry_policy != "bring")
+        row.yearly_reset = carry_policy != "bring"
         with SessionLocal() as s:
-            s.merge(row); s.commit()
+            s.merge(row)
+            s.commit()
 
         for i in range(50):
             self.tbl.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-            self.tbl.setItem(i, 1, QTableWidgetItem(str(years.get(str(i + 1), 14))))
+            self.tbl.setItem(
+                i,
+                1,
+                QTableWidgetItem(str(years.get(str(i + 1), 14))),
+            )
 
         self._toggle_carry_ui()
 
@@ -2193,8 +2894,15 @@ class LeaveDefaultsDialog(QDialog):
             return
         typ = itm.text()
 
-        years = {str(i + 1): self._int_or_zero(self.tbl.item(i, 1)) for i in range(50)}
-        carry_policy = "bring" if self.carry_policy.currentText() == "Bring forward" else "reset"
+        years = {
+            str(i + 1): self._int_or_zero(self.tbl.item(i, 1))
+            for i in range(50)
+        }
+        carry_policy = (
+            "bring"
+            if self.carry_policy.currentText() == "Bring forward"
+            else "reset"
+        )
         meta = {
             "carry_policy": carry_policy,
             "carry_limit_enabled": self.carry_limit_enable.isChecked(),
@@ -2202,22 +2910,31 @@ class LeaveDefaultsDialog(QDialog):
         }
 
         with SessionLocal() as s:
-            row = s.query(LeaveDefault)\
-                   .filter(LeaveDefault.account_id == tenant_id(),
-                           LeaveDefault.leave_type == typ).first()
+            row = (
+                s.query(LeaveDefault)
+                .filter(
+                    LeaveDefault.account_id == tenant_id(),
+                    LeaveDefault.leave_type == typ,
+                )
+                .first()
+            )
             if not row:
-                row = LeaveDefault(account_id=tenant_id(), leave_type=typ)
+                row = LeaveDefault(
+                    account_id=tenant_id(), leave_type=typ
+                )
                 s.add(row)
 
-            row.prorated = (self.prorated.currentText() == "True")
-            row.yearly_reset = (carry_policy != "bring")
+            row.prorated = self.prorated.currentText() == "True"
+            row.yearly_reset = carry_policy != "bring"
             row.table_json = json.dumps({"years": years, "_meta": meta})
             s.commit()
 
         QMessageBox.information(self, "Leave Defaults", f"Saved '{typ}'")
 
     def _add_type(self):
-        name, ok = QInputDialog.getText(self, "Add Leave Type", "Name:")
+        name, ok = QInputDialog.getText(
+            self, "Add Leave Type", "Name:"
+        )
         if not ok or not name.strip():
             return
         name = _clean_text(name)
@@ -2232,14 +2949,21 @@ class LeaveDefaultsDialog(QDialog):
         if not itm:
             return
         old = itm.text()
-        new, ok = QInputDialog.getText(self, "Rename Leave Type", "New name:", text=old)
+        new, ok = QInputDialog.getText(
+            self, "Rename Leave Type", "New name:", text=old
+        )
         if not ok or not new.strip() or new == old:
             return
         new = _clean_text(new)
         with SessionLocal() as s:
-            row = s.query(LeaveDefault)\
-                   .filter(LeaveDefault.account_id == tenant_id(),
-                           LeaveDefault.leave_type == old).first()
+            row = (
+                s.query(LeaveDefault)
+                .filter(
+                    LeaveDefault.account_id == tenant_id(),
+                    LeaveDefault.leave_type == old,
+                )
+                .first()
+            )
             if row:
                 row.leave_type = new
                 s.commit()
@@ -2253,12 +2977,22 @@ class LeaveDefaultsDialog(QDialog):
         if not itm:
             return
         typ = itm.text()
-        if QMessageBox.question(self, "Delete", f"Delete leave type '{typ}'?") != QMessageBox.Yes:
+        if (
+            QMessageBox.question(
+                self, "Delete", f"Delete leave type '{typ}'?"
+            )
+            != QMessageBox.Yes
+        ):
             return
         with SessionLocal() as s:
-            rows = s.query(LeaveDefault)\
-                    .filter(LeaveDefault.account_id == tenant_id(),
-                            LeaveDefault.leave_type == typ).all()
+            rows = (
+                s.query(LeaveDefault)
+                .filter(
+                    LeaveDefault.account_id == tenant_id(),
+                    LeaveDefault.leave_type == typ,
+                )
+                .all()
+            )
             for r in rows:
                 s.delete(r)
             s.commit()
@@ -2307,20 +3041,32 @@ def _employeeeditor_save(self: EmployeeEditor):
         if self._emp_id:
             e = s.get(Employee, self._emp_id)
             if not e:
-                QMessageBox.critical(self, "Error", "Employee record not found.")
+                QMessageBox.critical(
+                    self, "Error", "Employee record not found."
+                )
                 return
         else:
             prefix, z = EMP_CODE_PREFIX, EMP_CODE_ZPAD
             existing = [
-                c for (c,) in s.query(Employee.code)
-                .filter(Employee.account_id == tenant_id(), Employee.code.isnot(None), Employee.code.like(f"{prefix}%"))
+                c
+                for (c,) in s.query(Employee.code)
+                .filter(
+                    Employee.account_id == tenant_id(),
+                    Employee.code.isnot(None),
+                    Employee.code.like(f"{prefix}%"),
+                )
                 .all()
             ]
+
             def _num_tail(c):
-                if not c: return None
+                if not c:
+                    return None
                 m = re.search(r"(\d+)$", c)
                 return int(m.group(1)) if m else None
-            used = {n for n in (_num_tail(c) for c in existing) if n is not None}
+
+            used = {
+                n for n in (_num_tail(c) for c in existing) if n is not None
+            }
             nxt = (max(used) + 1) if used else 1
             code = f"{prefix}{nxt:0{z}d}"
 
@@ -2346,7 +3092,11 @@ def _employeeeditor_save(self: EmployeeEditor):
         # employment
         e.employment_status = self.employment_status.currentText() or ""
         e.employment_pass = self.employment_pass.currentText() or ""
-        e.work_permit_number = _clean_text(self.work_permit_number.text()) if self.work_permit_number.isEnabled() else ""
+        e.work_permit_number = (
+            _clean_text(self.work_permit_number.text())
+            if self.work_permit_number.isEnabled()
+            else ""
+        )
         e.department = self.department.currentText() or ""
         e.position = self.position.currentText() or ""
         e.employment_type = self.employment_type.currentText() or ""
@@ -2366,18 +3116,38 @@ def _employeeeditor_save(self: EmployeeEditor):
         e.levy = f2(self.levy.text())
 
         # salary history -> compute basic from latest start_date
-        s.query(SalaryHistory).filter(SalaryHistory.employee_id == e.id).delete()
+        s.query(SalaryHistory).filter(
+            SalaryHistory.employee_id == e.id
+        ).delete()
         latest_amt, latest_start = 0.0, date(1900, 1, 1)
         for r in range(self.salary_tbl.rowCount()):
             try:
                 amt = f2(self.salary_tbl.item(r, 0).text())
-                sd_txt = _clean_text(self.salary_tbl.item(r, 1).text() or "")
-                ed_txt = _clean_text(self.salary_tbl.item(r, 2).text() or "")
-                sd = datetime.strptime(sd_txt, "%Y-%m-%d").date() if sd_txt else None
-                ed = datetime.strptime(ed_txt, "%Y-%m-%d").date() if ed_txt else None
+                sd_txt = _clean_text(
+                    self.salary_tbl.item(r, 1).text() or ""
+                )
+                ed_txt = _clean_text(
+                    self.salary_tbl.item(r, 2).text() or ""
+                )
+                sd = (
+                    datetime.strptime(sd_txt, "%Y-%m-%d").date()
+                    if sd_txt
+                    else None
+                )
+                ed = (
+                    datetime.strptime(ed_txt, "%Y-%m-%d").date()
+                    if ed_txt
+                    else None
+                )
             except Exception:
                 continue
-            row = SalaryHistory(account_id=tenant_id(), employee_id=e.id, amount=amt, start_date=sd, end_date=ed)
+            row = SalaryHistory(
+                account_id=tenant_id(),
+                employee_id=e.id,
+                amount=amt,
+                start_date=sd,
+                end_date=ed,
+            )
             s.add(row)
             if sd and sd >= latest_start:
                 latest_start = sd
@@ -2385,30 +3155,48 @@ def _employeeeditor_save(self: EmployeeEditor):
         e.basic_salary = latest_amt
 
         # work schedule
-        s.query(WorkScheduleDay).filter(WorkScheduleDay.employee_id == e.id).delete()
+        s.query(WorkScheduleDay).filter(
+            WorkScheduleDay.employee_id == e.id
+        ).delete()
         for i in range(7):
             chk: QCheckBox = self.ws_tbl.cellWidget(i, 1)
             cmb: QComboBox = self.ws_tbl.cellWidget(i, 2)
-            s.add(WorkScheduleDay(
-                account_id=tenant_id(), employee_id=e.id,
-                weekday=i, working=chk.isChecked(), day_type=cmb.currentText()
-            ))
+            s.add(
+                WorkScheduleDay(
+                    account_id=tenant_id(),
+                    employee_id=e.id,
+                    weekday=i,
+                    working=chk.isChecked(),
+                    day_type=cmb.currentText(),
+                )
+            )
 
         # entitlements
-        s.query(LeaveEntitlement).filter(LeaveEntitlement.employee_id == e.id).delete()
+        s.query(LeaveEntitlement).filter(
+            LeaveEntitlement.employee_id == e.id
+        ).delete()
         for r in range(50):
             for c in range(self.ent_tbl.columnCount()):
                 hdr = self.ent_tbl.horizontalHeaderItem(c)
                 t = hdr.text() if hdr else "Leave"
                 cell = self.ent_tbl.item(r, c)
                 try:
-                    days = float(cell.text()) if cell and cell.text() else 0.0
+                    days = (
+                        float(cell.text())
+                        if cell and cell.text()
+                        else 0.0
+                    )
                 except Exception:
                     days = 0.0
-                s.add(LeaveEntitlement(
-                    account_id=tenant_id(), employee_id=e.id,
-                    year_of_service=r + 1, leave_type=t, days=days
-                ))
+                s.add(
+                    LeaveEntitlement(
+                        account_id=tenant_id(),
+                        employee_id=e.id,
+                        year_of_service=r + 1,
+                        leave_type=t,
+                        days=days,
+                    )
+                )
 
         try:
             s.commit()
