@@ -23,9 +23,6 @@ def _ensure_authenticated() -> None:
     """
 
     client = APIClient.get()
-    # Ensure we are pointing to the configured host (e.g., 34.87.155.9) instead
-    # of the localhost fallback.
-    client.refresh_base_url()
     if client.has_token():
         return
 
