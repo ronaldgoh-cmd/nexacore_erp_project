@@ -36,9 +36,41 @@ def module_manifest() -> dict:
 # ---- shared date helpers ----
 MIN_DATE = date(1900, 1, 1)
 
+def _parse_date(value) -> date | None:
+    """
+    Accepts:
+      - None
+      - datetime.date
+      - datetime.datetime
+      - 'YYYY-MM-DD' or similar strings
+    Returns a date or None (if blank/invalid/before MIN_DATE).
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return None if value <= MIN_DATE else value
+    if isinstance(value, datetime):
+        d = value.date()
+        return None if d <= MIN_DATE else d
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        # try ISO first
+        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+            try:
+                d = datetime.strptime(s, fmt).date()
+                return None if d <= MIN_DATE else d
+            except Exception:
+                continue
+        return None
+    return None
 
-def _fmt_date(d: date | None) -> str:
-    return "" if (not d or d <= MIN_DATE) else d.strftime("%Y-%m-%d")
+
+def _fmt_date(d) -> str:
+    d = _parse_date(d)
+    return "" if not d else d.strftime("%Y-%m-%d")
+
 
 
 def _clean_text(s: str) -> str:
@@ -145,9 +177,12 @@ from ....core.permissions import can_view
 from ....core.auth import get_current_user
 from ....core.events import employee_events
 from ..models import (
-    Employee, SalaryHistory, Holiday, DropdownOption, LeaveDefault,
-    WorkScheduleDay, LeaveEntitlement
+    Holiday,
+    DropdownOption,
+    LeaveDefault,
 )
+from ....core.api_employees import api_employees
+
 
 
 # ---- block wheel changes on all combo boxes (when popup closed) ----
@@ -261,6 +296,7 @@ class EmployeeMainWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.setObjectName("EmployeeMainWidget")
+        self.api = api_employees
         global EMP_CODE_PREFIX, EMP_CODE_ZPAD
         EMP_CODE_PREFIX, EMP_CODE_ZPAD = _load_code_settings()
 
@@ -510,8 +546,17 @@ class EmployeeMainWidget(QWidget):
         return c
 
     def _reload_employees(self):
-        with SessionLocal() as s:
-            rows = s.query(Employee).filter(Employee.account_id == tenant_id()).all()
+        try:
+            rows = self.api.list_employees()
+        except Exception as ex:
+            QMessageBox.warning(
+                self,
+                "Employees",
+                f"Failed to load employees from server:\n{ex}",
+            )
+            rows = []
+
+        # simple list of dicts from API
         self._all_rows = rows
         self._apply_filters()
 
@@ -543,26 +588,33 @@ class EmployeeMainWidget(QWidget):
         age_min = to_int(f_get("age_min"))
         age_max = to_int(f_get("age_max"))
 
-        def keep(e: Employee) -> bool:
-            if not ((e.code or "").strip() or (e.full_name or "").strip()):
+        def _field(e: dict, key: str) -> str:
+            v = e.get(key)
+            return "" if v is None else str(v)
+
+        def keep(e: dict) -> bool:
+            if not ((_field(e, "code").strip()) or (_field(e, "full_name").strip())):
                 return False
+
             if txt:
                 hay = " ".join(
                     [
-                        str(e.employment_status or ""),
-                        str(e.code or ""),
-                        str(e.full_name or ""),
-                        str(getattr(e, "department", "") or ""),
-                        str(e.position or ""),
-                        str(e.employment_type or ""),
-                        str(e.id_type or ""),
-                        str(e.id_number or ""),
-                        str(e.country or ""),
-                        str(e.residency or ""),
+                        _field(e, "employment_status"),
+                        _field(e, "code"),
+                        _field(e, "full_name"),
+                        _field(e, "department"),
+                        _field(e, "position"),
+                        _field(e, "employment_type"),
+                        _field(e, "id_type"),
+                        _field(e, "id_number"),
+                        _field(e, "country"),
+                        _field(e, "residency"),
                     ]
                 ).lower()
                 if txt not in hay:
                     return False
+
+            # per-column filters
             for key in [
                 "employment_status",
                 "code",
@@ -576,14 +628,18 @@ class EmployeeMainWidget(QWidget):
                 "residency",
             ]:
                 val = f_get(key)
-                if val and val not in str(getattr(e, key, "") or "").lower():
+                if val and val not in _field(e, key).lower():
                     return False
+
+            # age filter
+            dob_dt = _parse_date(e.get("dob"))
             age = None
-            if e.dob and e.dob > MIN_DATE:
+            if dob_dt:
                 try:
-                    age = int((datetime.utcnow().date() - e.dob).days // 365.25)
+                    age = int((datetime.utcnow().date() - dob_dt).days // 365.25)
                 except Exception:
                     age = None
+
             if age_min is not None and (age is None or age < age_min):
                 return False
             if age_max is not None and (age is None or age > age_max):
@@ -594,31 +650,32 @@ class EmployeeMainWidget(QWidget):
 
         self.emp_table.setSortingEnabled(False)
         self.emp_table.setRowCount(len(rows))
-        for r, e in enumerate(rows):
-            def put(col, val):
-                self.emp_table.setItem(r, col, QTableWidgetItem(val))
 
-            employment_status = e.employment_status or ""
-            code = e.code or ""
-            full_name = e.full_name or ""
-            department = getattr(e, "department", "") or ""
-            position = e.position or ""
-            employment_type = e.employment_type or ""
-            dob_txt = _fmt_date(e.dob)
+        for r, e in enumerate(rows):
+            employment_status = _field(e, "employment_status")
+            code = _field(e, "code")
+            full_name = _field(e, "full_name")
+            department = _field(e, "department")
+            position = _field(e, "position")
+            employment_type = _field(e, "employment_type")
+            dob_txt = _fmt_date(e.get("dob"))
+
             age_txt = ""
-            if e.dob and e.dob > MIN_DATE:
+            dob_dt = _parse_date(e.get("dob"))
+            if dob_dt:
                 try:
                     age_txt = str(
-                        int((datetime.utcnow().date() - e.dob).days // 365.25)
+                        int((datetime.utcnow().date() - dob_dt).days // 365.25)
                     )
                 except Exception:
                     age_txt = ""
-            id_type = e.id_type or ""
-            id_number = e.id_number or ""
-            country = e.country or ""
-            residency = e.residency or ""
-            join_date = _fmt_date(e.join_date)
-            exit_date = _fmt_date(e.exit_date)
+
+            id_type = _field(e, "id_type")
+            id_number = _field(e, "id_number")
+            country = _field(e, "country")
+            residency = _field(e, "residency")
+            join_date = _fmt_date(e.get("join_date"))
+            exit_date = _fmt_date(e.get("exit_date"))
 
             values = [
                 employment_status,
@@ -636,10 +693,15 @@ class EmployeeMainWidget(QWidget):
                 join_date,
                 exit_date,
             ]
-            for c, v in enumerate(values):
-                put(c, v)
 
-            self.emp_table.setVerticalHeaderItem(r, QTableWidgetItem(str(e.id)))
+            for c, v in enumerate(values):
+                self.emp_table.setItem(r, c, QTableWidgetItem(v))
+
+            # store id in vertical header
+            emp_id = e.get("id")
+            self.emp_table.setVerticalHeaderItem(
+                r, QTableWidgetItem("" if emp_id is None else str(emp_id))
+            )
 
         if self.emp_table.rowCount() > 0:
             self.emp_table.selectRow(0)
@@ -703,26 +765,26 @@ class EmployeeMainWidget(QWidget):
         if not sel:
             self._clear_preview()
             return
+
         r = self.emp_table.currentRow()
         id_item = self.emp_table.verticalHeaderItem(r)
-        emp_id = int(id_item.text()) if id_item else None
+        try:
+            emp_id = int(id_item.text()) if id_item and id_item.text() else None
+        except ValueError:
+            emp_id = None
+
         if not emp_id:
             self._clear_preview()
             return
-        with SessionLocal() as s:
-            e = s.get(Employee, emp_id)
-        if not e:
+
+        try:
+            e = self.api.get_employee(emp_id)
+        except Exception as ex:
+            QMessageBox.warning(self, "Employee", f"Failed to load from server:\n{ex}")
             self._clear_preview()
             return
 
         L = self.detail_form["labels"]
-        fmt = _fmt_date
-        age_txt = ""
-        if e.dob and e.dob > MIN_DATE:
-            try:
-                age_txt = str(int((datetime.utcnow().date() - e.dob).days // 365.25))
-            except Exception:
-                age_txt = ""
 
         def put(k, v):
             if isinstance(v, str):
@@ -732,41 +794,49 @@ class EmployeeMainWidget(QWidget):
             else:
                 L[k].setText("" if v is None else str(v))
 
-        put("Employee Code", e.code or "")
-        put("Full Name", e.full_name or "")
-        put("Email", e.email or "")
-        put("Contact Number", e.contact_number or "")
-        put("Address", e.address or "")
-        put("ID Type", e.id_type or "")
-        put("ID Number", e.id_number or "")
-        put("Gender", e.gender or "")
-        put("Date of Birth", fmt(e.dob))
+        dob_dt = _parse_date(e.get("dob"))
+        age_txt = ""
+        if dob_dt:
+            try:
+                age_txt = str(int((date.today() - dob_dt).days // 365.25))
+            except Exception:
+                age_txt = ""
+
+        put("Employee Code", e.get("code") or "")
+        put("Full Name", e.get("full_name") or "")
+        put("Email", e.get("email") or "")
+        put("Contact Number", e.get("contact_number") or "")
+        put("Address", e.get("address") or "")
+        put("ID Type", e.get("id_type") or "")
+        put("ID Number", e.get("id_number") or "")
+        put("Gender", e.get("gender") or "")
+        put("Date of Birth", _fmt_date(e.get("dob")))
         put("Age", age_txt)
-        put("Race", e.race or "")
-        put("Country", e.country or "")
-        put("Residency", e.residency or "")
-        put("PR Date", fmt(e.pr_date))
-        put("Employment Status", e.employment_status or "")
-        put("Employment Pass", e.employment_pass or "")
-        put("Work Permit Number", e.work_permit_number or "")
-        put("Department", getattr(e, "department", "") or "")
-        put("Position", e.position or "")
-        put("Employment Type", e.employment_type or "")
-        put("Join Date", fmt(e.join_date))
-        put("Exit Date", fmt(e.exit_date))
-        put("Holiday Group", e.holiday_group or "")
-        put("Bank", e.bank or "")
-        put("Account Number", e.bank_account or "")
-        put("Basic Salary", e.basic_salary or 0.0)
-        put("Incentives", e.incentives or 0.0)
-        put("Allowance", e.allowance or 0.0)
-        put("Overtime Rate", e.overtime_rate or 0.0)
-        put("Part Time Rate", e.parttime_rate or 0.0)
-        put("Levy", e.levy or 0.0)
+        put("Race", e.get("race") or "")
+        put("Country", e.get("country") or "")
+        put("Residency", e.get("residency") or "")
+        put("PR Date", _fmt_date(e.get("pr_date")))
+        put("Employment Status", e.get("employment_status") or "")
+        put("Employment Pass", e.get("employment_pass") or "")
+        put("Work Permit Number", e.get("work_permit_number") or "")
+        put("Department", e.get("department") or "")
+        put("Position", e.get("position") or "")
+        put("Employment Type", e.get("employment_type") or "")
+        put("Join Date", _fmt_date(e.get("join_date")))
+        put("Exit Date", _fmt_date(e.get("exit_date")))
+        put("Holiday Group", e.get("holiday_group") or "")
+        put("Bank", e.get("bank") or "")
+        put("Account Number", e.get("bank_account") or "")
+        put("Basic Salary", float(e.get("basic_salary") or 0.0))
+        put("Incentives", float(e.get("incentives") or 0.0))
+        put("Allowance", float(e.get("allowance") or 0.0))
+        put("Overtime Rate", float(e.get("overtime_rate") or 0.0))
+        put("Part Time Rate", float(e.get("parttime_rate") or 0.0))
+        put("Levy", float(e.get("levy") or 0.0))
 
     # --- list actions ---
     def _add_employee(self):
-        d = EmployeeEditor(parent=self)
+        d = EmployeeEditor(parent=self, api_client=self.api)
         if d.exec() == QDialog.Accepted:
             self._reload_employees()
             self._notify_employees_changed()
@@ -776,12 +846,16 @@ class EmployeeMainWidget(QWidget):
         if r < 0:
             return
         id_item = self.emp_table.verticalHeaderItem(r)
-        emp_id = int(id_item.text()) if id_item else None
+        try:
+            emp_id = int(id_item.text()) if id_item and id_item.text() else None
+        except ValueError:
+            emp_id = None
         if not emp_id:
             return
-        d = EmployeeEditor(emp_id, parent=self)
+        d = EmployeeEditor(emp_id=emp_id, parent=self, api_client=self.api)
         if d.exec() == QDialog.Accepted:
             self._reload_employees()
+            # reselect same employee if still present
             for i in range(self.emp_table.rowCount()):
                 ii = self.emp_table.verticalHeaderItem(i)
                 if ii and ii.text() == str(emp_id):
@@ -794,21 +868,24 @@ class EmployeeMainWidget(QWidget):
         if r < 0:
             return
         id_item = self.emp_table.verticalHeaderItem(r)
-        emp_id = int(id_item.text()) if id_item else None
+        try:
+            emp_id = int(id_item.text()) if id_item and id_item.text() else None
+        except ValueError:
+            emp_id = None
         if not emp_id:
             return
         if (
-            QMessageBox.question(
-                self, "Delete", "Delete selected employee?"
-            )
-            != QMessageBox.Yes
+                QMessageBox.question(
+                    self, "Delete", "Delete selected employee?"
+                )
+                != QMessageBox.Yes
         ):
             return
-        with SessionLocal() as s:
-            e = s.get(Employee, emp_id)
-            if e:
-                s.delete(e)
-                s.commit()
+        try:
+            self.api.delete_employee(emp_id)
+        except Exception as ex:
+            QMessageBox.critical(self, "Delete", f"Failed to delete on server:\n{ex}")
+            return
         self._reload_employees()
         self._notify_employees_changed()
 
@@ -1203,409 +1280,43 @@ class EmployeeMainWidget(QWidget):
         self.tabs.addTab(host, "Employee Settings")
 
     def _export_xlsx(self):
-        try:
-            from openpyxl import Workbook
-            from openpyxl.worksheet.datavalidation import DataValidation
-            from openpyxl.utils import get_column_letter
-        except Exception:
-            QMessageBox.warning(self, "Export", "openpyxl not installed")
-            return
-
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Employees", "employees.xlsx", "Excel (*.xlsx)"
         )
         if not path:
             return
-
-        with SessionLocal() as s:
-            drop = {}
-            for r in (
-                s.query(DropdownOption)
-                .filter(DropdownOption.account_id == tenant_id())
-                .all()
-            ):
-                drop.setdefault(r.category, []).append(r.value)
-            emps = (
-                s.query(Employee)
-                .filter(Employee.account_id == tenant_id())
-                .all()
-            )
-            groups = [
-                g[0]
-                for g in s.query(Holiday.group_code)
-                .filter(Holiday.account_id == tenant_id())
-                .distinct()
-                .all()
-            ]
-        drop.setdefault("Holiday Group", groups)
-        drop.setdefault("Employment Status", ["Active", "Non-Active"])
-
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Employees"
-        ws2 = wb.create_sheet("Dropdowns")
-
-        # write dropdowns
-        drow = 1
-        for cat, vals in sorted(drop.items()):
-            ws2.cell(drow, 1, cat)
-            for i, v in enumerate(sorted(vals), start=2):
-                ws2.cell(drow, i, _clean_text(v))
-            drow += 1
-
-        headers = [
-            "Employee Code",
-            "Full Name",
-            "Email",
-            "Contact Number",
-            "Address",
-            "ID Type",
-            "ID Number",
-            "Gender",
-            "Date of Birth",
-            "Race",
-            "Country",
-            "Residency",
-            "PR Date",
-            "Employment Status",
-            "Employment Pass",
-            "Work Permit Number",
-            "Department",
-            "Position",
-            "Employment Type",
-            "Join Date",
-            "Exit Date",
-            "Holiday Group",
-            "Bank",
-            "Account Number",
-            "Incentives",
-            "Allowance",
-            "Overtime Rate",
-            "Part Time Rate",
-            "Levy",
-            "Basic Salary",
-        ]
-        ws.append(headers)
-
-        for e in emps:
-            ws.append(
-                [
-                    e.code or "",
-                    e.full_name or "",
-                    e.email or "",
-                    e.contact_number or "",
-                    e.address or "",
-                    e.id_type or "",
-                    e.id_number or "",
-                    e.gender or "",
-                    _fmt_date(e.dob),
-                    e.race or "",
-                    e.country or "",
-                    e.residency or "",
-                    _fmt_date(e.pr_date),
-                    e.employment_status or "",
-                    e.employment_pass or "",
-                    e.work_permit_number or "",
-                    getattr(e, "department", "") or "",
-                    e.position or "",
-                    e.employment_type or "",
-                    _fmt_date(e.join_date),
-                    _fmt_date(e.exit_date),
-                    e.holiday_group or "",
-                    e.bank or "",
-                    e.bank_account or "",
-                    e.incentives or 0.0,
-                    e.allowance or 0.0,
-                    e.overtime_rate or 0.0,
-                    e.parttime_rate or 0.0,
-                    e.levy or 0.0,
-                    e.basic_salary or 0.0,
-                ]
-            )
-
-        col_index = {h: i + 1 for i, h in enumerate(headers)}
-        dv_map = {
-            "ID Type": "ID Type",
-            "Gender": "Gender",
-            "Race": "Race",
-            "Country": "Country",
-            "Residency": "Residency",
-            "Employment Status": "Employment Status",
-            "Employment Pass": "Employment Pass",
-            "Department": "Department",
-            "Position": "Position",
-            "Employment Type": "Employment Type",
-            "Bank": "Bank",
-            "Holiday Group": "Holiday Group",
-        }
-        cat_formula = {}
-        for r in range(1, ws2.max_row + 1):
-            cat = ws2.cell(r, 1).value
-            if not cat:
-                continue
-            cat_formula[
-                cat
-            ] = f'=OFFSET(Dropdowns!$B${r},0,0,1,COUNTA(Dropdowns!$B${r}:$ZZ${r}))'
-
-        max_rows = max(1000, ws.max_row + 100)
-        for header, cat in dv_map.items():
-            if cat not in cat_formula or header not in col_index:
-                continue
-            c = col_index[header]
-            dv = DataValidation(
-                type="list",
-                formula1=cat_formula[cat],
-                allow_blank=True,
-                showDropDown=True,
-            )
-            ws.add_data_validation(dv)
-            dv.ranges.add(
-                f"{ws.cell(2, c).coordinate}:{ws.cell(max_rows, c).coordinate}"
-            )
-
-        ws.freeze_panes = "A2"
         try:
-            wb.save(path)
-            QMessageBox.information(self, "Export", "Export complete.")
+            self.api.export_employees_xlsx(path)
         except Exception as ex:
-            QMessageBox.warning(self, "Export", f"Failed to save: {ex}")
+            QMessageBox.warning(self, "Export", f"Failed to export from server:\n{ex}")
+            return
+        QMessageBox.information(self, "Export", "Export complete.")
 
     def _import_xlsx(self):
-        try:
-            from openpyxl import load_workbook
-        except Exception:
-            QMessageBox.warning(self, "Import", "openpyxl not installed")
-            return
-
         path, _ = QFileDialog.getOpenFileName(
             self, "Import Employees", "", "Excel (*.xlsx)"
         )
         if not path:
             return
-
         try:
-            wb = load_workbook(path, data_only=True)
-            ws = wb["Employees"]
+            summary = self.api.import_employees_xlsx(path)
         except Exception as ex:
-            QMessageBox.warning(self, "Import", f"Cannot open workbook: {ex}")
+            QMessageBox.warning(self, "Import", f"Failed to import to server:\n{ex}")
             return
 
-        def _norm_header(s: str) -> str:
-            if not isinstance(s, str):
-                return ""
-            s = unicodedata.normalize("NFKC", s)
-            s = re.sub(r"[\u00A0\u200B-\u200D\uFEFF]", "", s)
-            return s.strip().lower()
-
-        headers: dict[str, int] = {}
-        for c in range(1, ws.max_column + 1):
-            h = ws.cell(1, c).value
-            key = _norm_header(h) if isinstance(h, str) else ""
-            if key:
-                headers[key] = c
-
-        if "full name" not in headers and "employee code" not in headers:
-            QMessageBox.warning(
-                self, "Import", "Sheet needs 'Full Name' or 'Employee Code'."
-            )
-            return
-
-        def gv(row, *names):
-            for name in names:
-                c = headers.get(_norm_header(name))
-                if c:
-                    return ws.cell(row, c).value
-            return None
-
-        def to_date(x):
-            BLANKS = {None, "", "-", "--", "—", "N/A", "NA"}
-            if x in BLANKS:
-                return None
-            if isinstance(x, datetime):
-                d = x.date()
-                return None if d <= MIN_DATE else d
-            if isinstance(x, date):
-                return None if x <= MIN_DATE else x
-            if isinstance(x, (int, float)):
-                try:
-                    from openpyxl.utils.datetime import (
-                        from_excel,
-                        CALENDAR_WINDOWS_1900 as CAL,
-                    )
-
-                    d = from_excel(x, CAL).date()
-                    return None if d <= MIN_DATE else d
-                except Exception:
-                    pass
-            if isinstance(x, str):
-                s = _clean_text(x)
-                if re.fullmatch(r"\d{1,6}", s):
-                    try:
-                        from openpyxl.utils.datetime import (
-                            from_excel,
-                            CALENDAR_WINDOWS_1900 as CAL,
-                        )
-
-                        d = from_excel(int(s), CAL).date()
-                        return None if d <= MIN_DATE else d
-                    except Exception:
-                        pass
-                for fmt in (
-                    "%Y-%m-%d",
-                    "%d-%m-%Y",
-                    "%d/%m/%Y",
-                    "%Y/%m/%d",
-                    "%d.%m.%Y",
-                ):
-                    try:
-                        d = datetime.strptime(s, fmt).date()
-                        return None if d <= MIN_DATE else d
-                    except Exception:
-                        continue
-                return None
-            return None
-
-        def to_float(x):
-            try:
-                return float(x)
-            except Exception:
-                return 0.0
-
-        def to_str(x):
-            s = "" if x is None else str(x)
-            s = _clean_text(s)
-            return "" if s in ("-", "--") else s
-
-        created = updated = 0
-        with SessionLocal() as s:
-            prefix, z = EMP_CODE_PREFIX, EMP_CODE_ZPAD
-            existing_codes = [
-                c
-                for (c,) in s.query(Employee.code)
-                .filter(
-                    Employee.account_id == tenant_id(),
-                    Employee.code.isnot(None),
-                    Employee.code.like(f"{prefix}%"),
-                )
-                .all()
-            ]
-
-            def _num_tail(c):
-                if not c:
-                    return None
-                m = re.search(r"(\d+)$", c)
-                return int(m.group(1)) if m else None
-
-            used_nums = {
-                n for n in (_num_tail(c) for c in existing_codes) if n is not None
-            }
-            cursor = max(used_nums) if used_nums else 0
-
-            def next_code():
-                nonlocal cursor
-                cursor += 1
-                code = f"{prefix}{cursor:0{z}d}"
-                used_nums.add(cursor)
-                return code
-
-            for r in range(2, ws.max_row + 1):
-                if not any(
-                    (ws.cell(r, c).value not in (None, "", " "))
-                    for c in range(1, ws.max_column + 1)
-                ):
-                    continue
-
-                code_raw = gv(r, "Employee Code", "code")
-                name_raw = gv(r, "Full Name", "full_name")
-
-                code = to_str(code_raw)
-                full_name = to_str(name_raw)
-
-                if not code and not full_name:
-                    continue
-
-                q = s.query(Employee).filter(
-                    Employee.account_id == tenant_id()
-                )
-                e = None
-                if code:
-                    e = q.filter(Employee.code == code).first()
-                if e is None and full_name:
-                    e = q.filter(Employee.full_name == full_name).first()
-
-                is_new = e is None
-                if is_new:
-                    if not code:
-                        code = next_code()
-                    e = Employee(
-                        account_id=tenant_id(), code=code, full_name=full_name
-                    )
-                    s.add(e)
-                else:
-                    if code and not (e.code or "").strip():
-                        e.code = code
-                    if full_name:
-                        e.full_name = full_name
-
-                e.email = to_str(gv(r, "Email", "email"))
-                e.contact_number = to_str(
-                    gv(r, "Contact Number", "contact_number")
-                )
-                e.address = to_str(gv(r, "Address", "address"))
-                e.id_type = to_str(gv(r, "ID Type", "id_type"))
-                e.id_number = to_str(gv(r, "ID Number", "id_number"))
-                e.gender = to_str(gv(r, "Gender", "gender"))
-                e.dob = to_date(gv(r, "Date of Birth", "dob"))
-                e.race = to_str(gv(r, "Race", "race"))
-                e.country = to_str(gv(r, "Country", "country"))
-                e.residency = to_str(gv(r, "Residency", "residency"))
-                e.pr_date = to_date(gv(r, "PR Date", "pr_date"))
-                e.employment_status = to_str(
-                    gv(r, "Employment Status", "employment_status")
-                )
-                e.employment_pass = to_str(
-                    gv(r, "Employment Pass", "employment_pass")
-                )
-                e.work_permit_number = to_str(
-                    gv(r, "Work Permit Number", "work_permit_number")
-                )
-                e.department = to_str(gv(r, "Department", "department"))
-                e.position = to_str(gv(r, "Position", "position"))
-                e.employment_type = to_str(
-                    gv(r, "Employment Type", "employment_type")
-                )
-                e.join_date = to_date(gv(r, "Join Date", "join_date"))
-                e.exit_date = to_date(gv(r, "Exit Date", "exit_date"))
-                e.holiday_group = to_str(
-                    gv(r, "Holiday Group", "holiday_group")
-                )
-                e.bank = to_str(gv(r, "Bank", "bank"))
-                e.bank_account = to_str(
-                    gv(r, "Account Number", "bank_account")
-                )
-
-                e.incentives = to_float(gv(r, "Incentives", "incentives"))
-                e.allowance = to_float(gv(r, "Allowance", "allowance"))
-                e.overtime_rate = to_float(
-                    gv(r, "Overtime Rate", "overtime_rate")
-                )
-                e.parttime_rate = to_float(
-                    gv(r, "Part Time Rate", "parttime_rate")
-                )
-                e.levy = to_float(gv(r, "Levy", "levy"))
-                b = gv(r, "Basic Salary", "basic_salary")
-                if b is not None:
-                    try:
-                        e.basic_salary = float(b)
-                    except Exception:
-                        pass
-
-                if is_new:
-                    created += 1
-                else:
-                    updated += 1
-
-            s.commit()
+        # optional: expect backend to return {"created": ..., "updated": ...}
+        msg = "Import complete."
+        if isinstance(summary, dict):
+            c = summary.get("created")
+            u = summary.get("updated")
+            extra = []
+            if c is not None:
+                extra.append(f"Created {c}")
+            if u is not None:
+                extra.append(f"Updated {u}")
+            if extra:
+                msg = msg + " " + ", ".join(extra) + "."
+        QMessageBox.information(self, "Import", msg)
 
         try:
             self._reload_employees()
@@ -1613,11 +1324,6 @@ class EmployeeMainWidget(QWidget):
             pass
         else:
             self._notify_employees_changed()
-        QMessageBox.information(
-            self,
-            "Import",
-            f"Import complete. Created {created}, Updated {updated}.",
-        )
 
     def _export_employees_template(self):
         if (
@@ -1848,10 +1554,18 @@ class EmployeeMainWidget(QWidget):
 
 # ---------- Employee Editor ----------
 class EmployeeEditor(QDialog):
-    def __init__(self, emp_id: int | None = None, parent=None):
+    def __init__(
+        self,
+        emp_id: int | None = None,
+        parent=None,
+        api_client=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Employee")
         self._emp_id = emp_id
+        self.api = api_client or api_employees
+        ...
+
 
         lay = QVBoxLayout(self)
         self.tabs = QTabWidget(self)
@@ -2250,173 +1964,141 @@ class EmployeeEditor(QDialog):
         self.tabs.addTab(w, "Leave Entitlement")
 
     def _load(self, emp_id: int):
-        with SessionLocal() as s:
-            e = s.get(Employee, emp_id)
-            if not e:
-                return
-            # Personal
-            self.full_name.setText(e.full_name or "")
-            self.email.setText(e.email or "")
-            self.contact.setText(e.contact_number or "")
-            self.address.setText(e.address or "")
-            self._set_combo_value(self.id_type, e.id_type)
-            self.id_number.setText(e.id_number or "")
-            self._set_combo_value(self.gender, e.gender)
+        try:
+            data = self.api.get_employee(emp_id)
+        except Exception as ex:
+            QMessageBox.warning(self, "Employee", f"Failed to load from server:\n{ex}")
+            return
 
-            if e.dob:
-                self.dob.set_real_date(
-                    QDate(e.dob.year, e.dob.month, e.dob.day)
-                )
-                self._update_age()
+        e = data  # dict
+
+        # ----- Personal -----
+        self.full_name.setText(e.get("full_name") or "")
+        self.email.setText(e.get("email") or "")
+        self.contact.setText(e.get("contact_number") or "")
+        self.address.setText(e.get("address") or "")
+
+        self._set_combo_value(self.id_type, e.get("id_type"))
+        self.id_number.setText(e.get("id_number") or "")
+        self._set_combo_value(self.gender, e.get("gender"))
+
+        dob_dt = _parse_date(e.get("dob"))
+        if dob_dt:
+            self.dob.set_real_date(QDate(dob_dt.year, dob_dt.month, dob_dt.day))
+            self._update_age()
+        else:
+            self.dob.clear()
+            self._update_age()
+
+        self._set_combo_value(self.race, e.get("race"))
+        self._set_combo_value(self.country, e.get("country"))
+        self._set_combo_value(self.residency, e.get("residency"))
+        self._toggle_pr_date(self.residency.currentText())
+
+        pr_dt = _parse_date(e.get("pr_date"))
+        if pr_dt:
+            self.pr_date.set_real_date(QDate(pr_dt.year, pr_dt.month, pr_dt.day))
+        else:
+            self.pr_date.clear()
+
+        # ----- Employment -----
+        self.employment_status.setCurrentText(e.get("employment_status") or "Active")
+        self._set_combo_value(self.employment_pass, e.get("employment_pass"))
+        self._toggle_wp(self.employment_pass.currentText())
+        self.work_permit_number.setText(e.get("work_permit_number") or "")
+
+        self._set_combo_value(self.department, e.get("department"))
+        self._set_combo_value(self.position, e.get("position"))
+        self._set_combo_value(self.employment_type, e.get("employment_type"))
+
+        join_dt = _parse_date(e.get("join_date"))
+        if join_dt:
+            self.join_date.set_real_date(QDate(join_dt.year, join_dt.month, join_dt.day))
+        else:
+            self.join_date.clear()
+
+        exit_dt = _parse_date(e.get("exit_date"))
+        if exit_dt:
+            self.exit_date.set_real_date(QDate(exit_dt.year, exit_dt.month, exit_dt.day))
+        else:
+            self.exit_date.clear()
+        self._sync_status_from_exit()
+
+        self._set_combo_value(self.holiday_group, e.get("holiday_group"))
+
+        # ----- Payment -----
+        self._set_combo_value(self.bank, e.get("bank"))
+        self.bank_account.setText(e.get("bank_account") or "")
+
+        # ----- Remuneration -----
+        self.incentives.setText(str(e.get("incentives") or 0))
+        self.allowance.setText(str(e.get("allowance") or 0))
+        self.ot_rate.setText(str(e.get("overtime_rate") or 0))
+        self.pt_rate.setText(str(e.get("parttime_rate") or 0))
+        self.levy.setText(str(e.get("levy") or 0))
+        self.basic_salary_lbl.setText(f"{float(e.get('basic_salary') or 0.0):.2f}")
+
+        # ----- Salary history -----
+        self.salary_tbl.setRowCount(0)
+        sh = data.get("salary_history", []) or []
+        for row in sh:
+            r = self.salary_tbl.rowCount()
+            self.salary_tbl.insertRow(r)
+            amt = float(row.get("amount") or 0.0)
+            sd = _fmt_date(row.get("start_date"))
+            ed = _fmt_date(row.get("end_date"))
+            self.salary_tbl.setItem(r, 0, QTableWidgetItem(f"{amt:.2f}"))
+            self.salary_tbl.setItem(r, 1, QTableWidgetItem(sd))
+            self.salary_tbl.setItem(r, 2, QTableWidgetItem(ed))
+
+        # ----- Work schedule -----
+        ws = {int(d.get("weekday")): d for d in (data.get("work_schedule") or []) if "weekday" in d}
+        for i in range(7):
+            chk: QCheckBox = self.ws_tbl.cellWidget(i, 1)
+            cmb: QComboBox = self.ws_tbl.cellWidget(i, 2)
+            rec = ws.get(i)
+            if rec:
+                chk.setChecked(bool(rec.get("working")))
+                cmb.setCurrentText(rec.get("day_type") or "Full")
             else:
-                self.dob.clear()
-                self._update_age()
-            self._set_combo_value(self.race, e.race)
-            self._set_combo_value(self.country, e.country)
-            self._set_combo_value(self.residency, e.residency)
-            self._toggle_pr_date(self.residency.currentText())
-            if e.pr_date:
-                self.pr_date.set_real_date(
-                    QDate(e.pr_date.year, e.pr_date.month, e.pr_date.day)
-                )
-            else:
-                self.pr_date.clear()
+                chk.setChecked(True)
+                cmb.setCurrentText("Full")
 
-            # Employment
-            # keep default behaviour for status via exit-date rule
-            self.employment_status.setCurrentText(
-                e.employment_status or "Active"
-            )
-            self._set_combo_value(self.employment_pass, e.employment_pass)
-            self._toggle_wp(self.employment_pass.currentText())
-            self.work_permit_number.setText(e.work_permit_number or "")
-            self._set_combo_value(self.department, getattr(e, "department", ""))
-            self._set_combo_value(self.position, e.position)
-            self._set_combo_value(self.employment_type, e.employment_type)
+        # ----- Entitlements -----
+        ents = data.get("entitlements") or []
+        types = sorted({(row.get("leave_type") or "").strip() for row in ents if row.get("leave_type")})
+        self.ent_leave_types = list(types) if types else ["Leave"]
 
-            if e.join_date:
-                self.join_date.set_real_date(
-                    QDate(e.join_date.year, e.join_date.month, e.join_date.day)
-                )
-            else:
-                self.join_date.clear()
+        self.ent_tbl.setColumnCount(len(self.ent_leave_types))
+        self.ent_tbl.setHorizontalHeaderLabels(self.ent_leave_types)
 
-            if e.exit_date:
-                self.exit_date.set_real_date(
-                    QDate(e.exit_date.year, e.exit_date.month, e.exit_date.day)
-                )
-            else:
-                self.exit_date.clear()
-            self._sync_status_from_exit()
+        grid = {}
+        for row in ents:
+            try:
+                year = int(row.get("year_of_service"))
+            except Exception:
+                continue
+            lt = row.get("leave_type")
+            if not lt:
+                continue
+            days = float(row.get("days") or 0.0)
+            grid[(year, lt)] = days
 
-            self._set_combo_value(self.holiday_group, e.holiday_group)
-
-            # Payment
-            self._set_combo_value(self.bank, e.bank)
-            self.bank_account.setText(e.bank_account or "")
-
-            # Remuneration
-            self.incentives.setText(str(e.incentives or 0))
-            self.allowance.setText(str(e.allowance or 0))
-            self.ot_rate.setText(str(e.overtime_rate or 0))
-            self.pt_rate.setText(str(e.parttime_rate or 0))
-            self.levy.setText(str(e.levy or 0))
-            self.basic_salary_lbl.setText(
-                f"{(e.basic_salary or 0.0):.2f}"
-            )
-
-            # Salary history
-            self.salary_tbl.setRowCount(0)
-            sh = (
-                s.query(SalaryHistory)
-                .filter(SalaryHistory.employee_id == emp_id)
-                .order_by(SalaryHistory.start_date.desc())
-                .all()
-            )
-            for row in sh:
-                r = self.salary_tbl.rowCount()
-                self.salary_tbl.insertRow(r)
-                self.salary_tbl.setItem(
-                    r, 0, QTableWidgetItem(f"{(row.amount or 0.0):.2f}")
-                )
-                self.salary_tbl.setItem(
-                    r,
-                    1,
-                    QTableWidgetItem(
-                        row.start_date.strftime("%Y-%m-%d")
-                        if row.start_date
-                        else ""
-                    ),
-                )
-                self.salary_tbl.setItem(
-                    r,
-                    2,
-                    QTableWidgetItem(
-                        row.end_date.strftime("%Y-%m-%d")
-                        if row.end_date
-                        else ""
-                    ),
-                )
-
-            # Work schedule
-            ws = {
-                d.weekday: d
-                for d in s.query(WorkScheduleDay)
-                .filter(WorkScheduleDay.employee_id == emp_id)
-                .all()
-            }
-            for i in range(7):
-                chk: QCheckBox = self.ws_tbl.cellWidget(i, 1)
-                cmb: QComboBox = self.ws_tbl.cellWidget(i, 2)
-                if i in ws:
-                    chk.setChecked(ws[i].working)
-                    cmb.setCurrentText(ws[i].day_type or "Full")
-                else:
-                    chk.setChecked(True)
-                    cmb.setCurrentText("Full")
-
-            # Entitlements
-            ents = (
-                s.query(LeaveEntitlement)
-                .filter(LeaveEntitlement.employee_id == emp_id)
-                .all()
-            )
-            types = sorted({row.leave_type for row in ents}) or getattr(
-                self, "ent_leave_types", []
-            )
-            self.ent_leave_types = list(types) if types else ["Leave"]
-            self.ent_tbl.setColumnCount(len(self.ent_leave_types))
-            self.ent_tbl.setHorizontalHeaderLabels(self.ent_leave_types)
-            grid = {
-                (r.year_of_service, r.leave_type): r.days for r in ents
-            }
-            for r in range(50):
-                for c, t in enumerate(self.ent_leave_types):
-                    val = grid.get((r + 1, t), 0)
-                    self.ent_tbl.setItem(
-                        r, c, QTableWidgetItem(str(val))
-                    )
+        for r in range(50):
+            for c, t in enumerate(self.ent_leave_types):
+                val = grid.get((r + 1, t), 0.0)
+                self.ent_tbl.setItem(r, c, QTableWidgetItem(str(val)))
 
     def _load_leave_types(self) -> list[str]:
-        # combine types from LeaveDefault AND existing per-employee entitlements (tenant-scoped), de-duped case-insensitively
-        out = []
+        # Use types from LeaveDefault only (tenant scoped), case-insensitive de-dup
+        out: list[str] = []
         seen = set()
         with SessionLocal() as s:
             for (t,) in (
-                s.query(LeaveDefault.leave_type)
-                .filter(LeaveDefault.account_id == tenant_id())
-                .distinct()
-                .all()
-            ):
-                k = (t or "").strip().casefold()
-                if k and k not in seen:
-                    seen.add(k)
-                    out.append(t)
-            for (t,) in (
-                s.query(LeaveEntitlement.leave_type)
-                .filter(LeaveEntitlement.account_id == tenant_id())
-                .distinct()
-                .all()
+                    s.query(LeaveDefault.leave_type)
+                            .filter(LeaveDefault.account_id == tenant_id())
+                            .distinct()
+                            .all()
             ):
                 k = (t or "").strip().casefold()
                 if k and k not in seen:
@@ -3015,7 +2697,7 @@ def _extract_trailing_int(txt: str | None):
 
 
 def _employeeeditor_save(self: EmployeeEditor):
-    def f2(x):
+    def f2(x: str) -> float:
         try:
             return float(x)
         except Exception:
@@ -3037,173 +2719,140 @@ def _employeeeditor_save(self: EmployeeEditor):
         QMessageBox.warning(self, "Missing", "Full Name is required.")
         return
 
-    with SessionLocal() as s:
-        if self._emp_id:
-            e = s.get(Employee, self._emp_id)
-            if not e:
-                QMessageBox.critical(
-                    self, "Error", "Employee record not found."
-                )
-                return
-        else:
-            prefix, z = EMP_CODE_PREFIX, EMP_CODE_ZPAD
-            existing = [
-                c
-                for (c,) in s.query(Employee.code)
-                .filter(
-                    Employee.account_id == tenant_id(),
-                    Employee.code.isnot(None),
-                    Employee.code.like(f"{prefix}%"),
-                )
-                .all()
-            ]
+    # -------- base payload (simple fields) --------
+    dob = dget(self.dob)
+    pr_date = dget(self.pr_date) if self.pr_date.isEnabled() else None
+    join_date = dget(self.join_date)
+    exit_date = dget(self.exit_date)
 
-            def _num_tail(c):
-                if not c:
-                    return None
-                m = re.search(r"(\d+)$", c)
-                return int(m.group(1)) if m else None
-
-            used = {
-                n for n in (_num_tail(c) for c in existing) if n is not None
-            }
-            nxt = (max(used) + 1) if used else 1
-            code = f"{prefix}{nxt:0{z}d}"
-
-            e = Employee(account_id=tenant_id(), code=code, full_name=name)
-            s.add(e)
-            s.flush()
-            self._emp_id = e.id
-
+    payload = {
         # personal
-        e.full_name = name
-        e.email = _clean_text(self.email.text())
-        e.contact_number = _clean_text(self.contact.text())
-        e.address = _clean_text(self.address.text())
-        e.id_type = self.id_type.currentText() or ""
-        e.id_number = _clean_text(self.id_number.text())
-        e.gender = self.gender.currentText() or ""
-        e.dob = dget(self.dob)
-        e.race = self.race.currentText() or ""
-        e.country = self.country.currentText() or ""
-        e.residency = self.residency.currentText() or ""
-        e.pr_date = dget(self.pr_date) if self.pr_date.isEnabled() else None
-
+        "full_name": name,
+        "email": _clean_text(self.email.text()),
+        "contact_number": _clean_text(self.contact.text()),
+        "address": _clean_text(self.address.text()),
+        "id_type": self.id_type.currentText() or "",
+        "id_number": _clean_text(self.id_number.text()),
+        "gender": self.gender.currentText() or "",
+        "dob": dob.isoformat() if dob else None,
+        "race": self.race.currentText() or "",
+        "country": self.country.currentText() or "",
+        "residency": self.residency.currentText() or "",
+        "pr_date": pr_date.isoformat() if pr_date else None,
         # employment
-        e.employment_status = self.employment_status.currentText() or ""
-        e.employment_pass = self.employment_pass.currentText() or ""
-        e.work_permit_number = (
+        "employment_status": self.employment_status.currentText() or "",
+        "employment_pass": self.employment_pass.currentText() or "",
+        "work_permit_number": (
             _clean_text(self.work_permit_number.text())
             if self.work_permit_number.isEnabled()
             else ""
-        )
-        e.department = self.department.currentText() or ""
-        e.position = self.position.currentText() or ""
-        e.employment_type = self.employment_type.currentText() or ""
-        e.join_date = dget(self.join_date)
-        e.exit_date = dget(self.exit_date)
-        e.holiday_group = self.holiday_group.currentText() or ""
-
+        ),
+        "department": self.department.currentText() or "",
+        "position": self.position.currentText() or "",
+        "employment_type": self.employment_type.currentText() or "",
+        "join_date": join_date.isoformat() if join_date else None,
+        "exit_date": exit_date.isoformat() if exit_date else None,
+        "holiday_group": self.holiday_group.currentText() or "",
         # payment
-        e.bank = self.bank.currentText() or ""
-        e.bank_account = _clean_text(self.bank_account.text())
+        "bank": self.bank.currentText() or "",
+        "bank_account": _clean_text(self.bank_account.text()),
+        # remuneration snapshot (basic_salary computed from salary history below)
+        "incentives": f2(self.incentives.text()),
+        "allowance": f2(self.allowance.text()),
+        "overtime_rate": f2(self.ot_rate.text()),
+        "parttime_rate": f2(self.pt_rate.text()),
+        "levy": f2(self.levy.text()),
+    }
 
-        # remuneration snapshot
-        e.incentives = f2(self.incentives.text())
-        e.allowance = f2(self.allowance.text())
-        e.overtime_rate = f2(self.ot_rate.text())
-        e.parttime_rate = f2(self.pt_rate.text())
-        e.levy = f2(self.levy.text())
+    # -------- salary history & basic salary --------
+    from datetime import datetime as _dt
 
-        # salary history -> compute basic from latest start_date
-        s.query(SalaryHistory).filter(
-            SalaryHistory.employee_id == e.id
-        ).delete()
-        latest_amt, latest_start = 0.0, date(1900, 1, 1)
-        for r in range(self.salary_tbl.rowCount()):
-            try:
-                amt = f2(self.salary_tbl.item(r, 0).text())
-                sd_txt = _clean_text(
-                    self.salary_tbl.item(r, 1).text() or ""
-                )
-                ed_txt = _clean_text(
-                    self.salary_tbl.item(r, 2).text() or ""
-                )
-                sd = (
-                    datetime.strptime(sd_txt, "%Y-%m-%d").date()
-                    if sd_txt
-                    else None
-                )
-                ed = (
-                    datetime.strptime(ed_txt, "%Y-%m-%d").date()
-                    if ed_txt
-                    else None
-                )
-            except Exception:
-                continue
-            row = SalaryHistory(
-                account_id=tenant_id(),
-                employee_id=e.id,
-                amount=amt,
-                start_date=sd,
-                end_date=ed,
-            )
-            s.add(row)
-            if sd and sd >= latest_start:
-                latest_start = sd
-                latest_amt = amt
-        e.basic_salary = latest_amt
+    salary_history = []
+    latest_amt, latest_start = 0.0, date(1900, 1, 1)
 
-        # work schedule
-        s.query(WorkScheduleDay).filter(
-            WorkScheduleDay.employee_id == e.id
-        ).delete()
-        for i in range(7):
-            chk: QCheckBox = self.ws_tbl.cellWidget(i, 1)
-            cmb: QComboBox = self.ws_tbl.cellWidget(i, 2)
-            s.add(
-                WorkScheduleDay(
-                    account_id=tenant_id(),
-                    employee_id=e.id,
-                    weekday=i,
-                    working=chk.isChecked(),
-                    day_type=cmb.currentText(),
-                )
-            )
-
-        # entitlements
-        s.query(LeaveEntitlement).filter(
-            LeaveEntitlement.employee_id == e.id
-        ).delete()
-        for r in range(50):
-            for c in range(self.ent_tbl.columnCount()):
-                hdr = self.ent_tbl.horizontalHeaderItem(c)
-                t = hdr.text() if hdr else "Leave"
-                cell = self.ent_tbl.item(r, c)
-                try:
-                    days = (
-                        float(cell.text())
-                        if cell and cell.text()
-                        else 0.0
-                    )
-                except Exception:
-                    days = 0.0
-                s.add(
-                    LeaveEntitlement(
-                        account_id=tenant_id(),
-                        employee_id=e.id,
-                        year_of_service=r + 1,
-                        leave_type=t,
-                        days=days,
-                    )
-                )
-
+    for r in range(self.salary_tbl.rowCount()):
+        cell_amt = self.salary_tbl.item(r, 0)
+        cell_sd = self.salary_tbl.item(r, 1)
+        cell_ed = self.salary_tbl.item(r, 2)
         try:
-            s.commit()
-        except Exception as ex:
-            s.rollback()
-            QMessageBox.critical(self, "Save failed", f"{ex}")
-            return
+            amt = f2(cell_amt.text() if cell_amt else "0")
+            sd_txt = _clean_text(cell_sd.text() if cell_sd else "")
+            ed_txt = _clean_text(cell_ed.text() if cell_ed else "")
+        except Exception:
+            continue
+
+        def _parse_ymd(s: str) -> date | None:
+            if not s:
+                return None
+            try:
+                return _dt.strptime(s, "%Y-%m-%d").date()
+            except Exception:
+                return None
+
+        sd = _parse_ymd(sd_txt)
+        ed = _parse_ymd(ed_txt)
+
+        salary_history.append(
+            {
+                "amount": amt,
+                "start_date": sd.isoformat() if sd else None,
+                "end_date": ed.isoformat() if ed else None,
+            }
+        )
+
+        if sd and sd >= latest_start:
+            latest_start = sd
+            latest_amt = amt
+
+    payload["basic_salary"] = latest_amt
+    payload["salary_history"] = salary_history
+
+    # -------- work schedule --------
+    work_schedule = []
+    for i in range(7):
+        chk: QCheckBox = self.ws_tbl.cellWidget(i, 1)
+        cmb: QComboBox = self.ws_tbl.cellWidget(i, 2)
+        work_schedule.append(
+            {
+                "weekday": i,
+                "working": bool(chk.isChecked()),
+                "day_type": cmb.currentText(),
+            }
+        )
+    payload["work_schedule"] = work_schedule
+
+    # -------- entitlements --------
+    entitlements = []
+    for r in range(50):
+        for c in range(self.ent_tbl.columnCount()):
+            hdr = self.ent_tbl.horizontalHeaderItem(c)
+            leave_type = hdr.text() if hdr else "Leave"
+            cell = self.ent_tbl.item(r, c)
+            try:
+                days = float(cell.text()) if cell and cell.text() else 0.0
+            except Exception:
+                days = 0.0
+            entitlements.append(
+                {
+                    "year_of_service": r + 1,
+                    "leave_type": leave_type,
+                    "days": days,
+                }
+            )
+    payload["entitlements"] = entitlements
+
+    # -------- send to backend --------
+    try:
+        if self._emp_id:
+            data = self.api.update_employee(self._emp_id, payload)
+        else:
+            data = self.api.create_employee(payload)
+            # use server-assigned id if available
+            if isinstance(data, dict) and "id" in data:
+                self._emp_id = data["id"]
+    except Exception as ex:
+        QMessageBox.critical(self, "Save failed", f"{ex}")
+        return
 
     self.accept()
 
