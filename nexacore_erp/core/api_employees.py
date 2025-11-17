@@ -118,3 +118,47 @@ def delete_employee(emp_id: int | str) -> None:
     DELETE /employees/{id}
     """
     _request("DELETE", f"/employees/{emp_id}")
+
+
+# ---------- Thin OO wrapper expected by the Qt UI ----------
+
+
+class APIEmployees:
+    """
+    Qt UI expects an `api_employees` object with methods.
+
+    This wraps the stateless helper functions above so the existing UI import
+    (``from ....core.api_employees import api_employees``) keeps working.
+    """
+
+    def list_employees(self) -> List[Dict[str, Any]]:
+        return list_employees()
+
+    def get_employee(self, emp_id: int | str) -> Dict[str, Any]:
+        resp = _request("GET", f"/employees/{emp_id}")
+        return resp.json()
+
+    def create_employee(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return create_employee(payload)
+
+    def update_employee(self, emp_id: int | str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return update_employee(emp_id, payload)
+
+    def delete_employee(self, emp_id: int | str) -> None:
+        delete_employee(emp_id)
+
+    # The desktop UI exposes import/export buttons; the FastAPI backend does not
+    # yet provide endpoints. Provide clear guidance rather than crashing.
+    def export_employees_xlsx(self, path: str) -> None:  # pragma: no cover - UI hook
+        raise EmployeeAPIError(
+            "Export to Excel is not available via the cloud API yet."
+        )
+
+    def import_employees_xlsx(self, path: str) -> Dict[str, Any]:  # pragma: no cover - UI hook
+        raise EmployeeAPIError(
+            "Import from Excel is not available via the cloud API yet."
+        )
+
+
+# Keep the name that the Qt module imports
+api_employees = APIEmployees()
