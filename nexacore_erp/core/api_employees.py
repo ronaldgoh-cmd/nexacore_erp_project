@@ -14,23 +14,58 @@ def _get_base() -> str:
     """
     Base URL for the backend.
 
-    Read from NEXACORE_API_BASE, defaulting to local dev.
-    Examples:
-      - http://34.87.155.9:8000
-      - http://127.0.0.1:8000
+    Priority (matches services.api_client):
+      1) NEXACORE_API_BASE_URL env var
+      2) legacy NEXACORE_API_BASE env var
+      3) nexacore_erp/config.json -> {"api_base_url": "..."}
+      4) fallback to http://127.0.0.1:8000
     """
-    base = os.getenv("NEXACORE_API_BASE", "http://127.0.0.1:8000")
-    return base.rstrip("/")  # avoid double slashes
+    env_url = os.getenv("NEXACORE_API_BASE_URL") or os.getenv("NEXACORE_API_BASE")
+    if env_url:
+        return env_url.rstrip("/")
+
+    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+    if os.path.exists(config_path):
+        try:
+            import json
+
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            cfg_url = data.get("api_base_url")
+            if cfg_url:
+                return str(cfg_url).rstrip("/")
+        except Exception:
+            # Fall back to localhost if config is malformed
+            pass
+
+    return "http://127.0.0.1:8000"
 
 
 def _get_token() -> Optional[str]:
     """
     Access token for Authorization header.
 
-    Read from NEXACORE_API_TOKEN and used as:
+    Read from NEXACORE_API_TOKEN (or config.json: api_access_token) and used as:
       Authorization: Bearer <token>
     """
-    return os.getenv("NEXACORE_API_TOKEN")
+    token = os.getenv("NEXACORE_API_TOKEN")
+    if token:
+        return token
+
+    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+    if os.path.exists(config_path):
+        try:
+            import json
+
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            cfg_token = data.get("api_access_token")
+            if cfg_token:
+                return str(cfg_token)
+        except Exception:
+            pass
+
+    return None
 
 
 def _headers() -> Dict[str, str]:
@@ -118,3 +153,47 @@ def delete_employee(emp_id: int | str) -> None:
     DELETE /employees/{id}
     """
     _request("DELETE", f"/employees/{emp_id}")
+
+
+# ---------- Thin OO wrapper expected by the Qt UI ----------
+
+
+class APIEmployees:
+    """
+    Qt UI expects an `api_employees` object with methods.
+
+    This wraps the stateless helper functions above so the existing UI import
+    (``from ....core.api_employees import api_employees``) keeps working.
+    """
+
+    def list_employees(self) -> List[Dict[str, Any]]:
+        return list_employees()
+
+    def get_employee(self, emp_id: int | str) -> Dict[str, Any]:
+        resp = _request("GET", f"/employees/{emp_id}")
+        return resp.json()
+
+    def create_employee(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return create_employee(payload)
+
+    def update_employee(self, emp_id: int | str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return update_employee(emp_id, payload)
+
+    def delete_employee(self, emp_id: int | str) -> None:
+        delete_employee(emp_id)
+
+    # The desktop UI exposes import/export buttons; the FastAPI backend does not
+    # yet provide endpoints. Provide clear guidance rather than crashing.
+    def export_employees_xlsx(self, path: str) -> None:  # pragma: no cover - UI hook
+        raise EmployeeAPIError(
+            "Export to Excel is not available via the cloud API yet."
+        )
+
+    def import_employees_xlsx(self, path: str) -> Dict[str, Any]:  # pragma: no cover - UI hook
+        raise EmployeeAPIError(
+            "Import from Excel is not available via the cloud API yet."
+        )
+
+
+# Keep the name that the Qt module imports
+api_employees = APIEmployees()
