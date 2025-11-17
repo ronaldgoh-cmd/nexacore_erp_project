@@ -14,23 +14,58 @@ def _get_base() -> str:
     """
     Base URL for the backend.
 
-    Read from NEXACORE_API_BASE, defaulting to local dev.
-    Examples:
-      - http://34.87.155.9:8000
-      - http://127.0.0.1:8000
+    Priority (matches services.api_client):
+      1) NEXACORE_API_BASE_URL env var
+      2) legacy NEXACORE_API_BASE env var
+      3) nexacore_erp/config.json -> {"api_base_url": "..."}
+      4) fallback to http://127.0.0.1:8000
     """
-    base = os.getenv("NEXACORE_API_BASE", "http://127.0.0.1:8000")
-    return base.rstrip("/")  # avoid double slashes
+    env_url = os.getenv("NEXACORE_API_BASE_URL") or os.getenv("NEXACORE_API_BASE")
+    if env_url:
+        return env_url.rstrip("/")
+
+    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+    if os.path.exists(config_path):
+        try:
+            import json
+
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            cfg_url = data.get("api_base_url")
+            if cfg_url:
+                return str(cfg_url).rstrip("/")
+        except Exception:
+            # Fall back to localhost if config is malformed
+            pass
+
+    return "http://127.0.0.1:8000"
 
 
 def _get_token() -> Optional[str]:
     """
     Access token for Authorization header.
 
-    Read from NEXACORE_API_TOKEN and used as:
+    Read from NEXACORE_API_TOKEN (or config.json: api_access_token) and used as:
       Authorization: Bearer <token>
     """
-    return os.getenv("NEXACORE_API_TOKEN")
+    token = os.getenv("NEXACORE_API_TOKEN")
+    if token:
+        return token
+
+    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+    if os.path.exists(config_path):
+        try:
+            import json
+
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            cfg_token = data.get("api_access_token")
+            if cfg_token:
+                return str(cfg_token)
+        except Exception:
+            pass
+
+    return None
 
 
 def _headers() -> Dict[str, str]:

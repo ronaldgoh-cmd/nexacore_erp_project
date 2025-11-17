@@ -150,6 +150,36 @@ class APIClient:
         self._client: Optional[httpx.AsyncClient] = None
         self._token: Optional[TokenInfo] = None
 
+    def refresh_base_url(self) -> None:
+        """
+        Re-read the configured base URL and rebuild the HTTP client if it
+        changes. This prevents accidentally calling http://127.0.0.1 when the
+        production IP is set in config.json or env vars.
+        """
+
+        new_base = _load_base_url().rstrip("/")
+        if new_base == self.base_url:
+            return
+
+        self.base_url = new_base
+
+        # If the HTTP client was already created with the old base URL, close
+        # it so the next request uses the correct host.
+        if self._client is not None:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Schedule close without blocking if we're inside the Qt
+                    # event loop.
+                    loop.create_task(self._client.aclose())
+                else:
+                    loop.run_until_complete(self._client.aclose())
+            except RuntimeError:
+                # No running loop; fall back to a new event loop.
+                asyncio.run(self._client.aclose())
+            finally:
+                self._client = None
+
     # ---------- Singleton helper ----------
 
     @classmethod
