@@ -61,6 +61,57 @@ def _load_base_url() -> str:
     return "http://127.0.0.1:8000"
 
 
+def _load_default_credentials() -> Dict[str, Optional[str]]:
+    """
+    Load default credentials from environment or config.json.
+
+    Environment variables win over config.json so you can override without
+    editing files:
+      - NEXACORE_API_USERNAME
+      - NEXACORE_API_PASSWORD
+      - NEXACORE_API_ACCOUNT_ID
+      - NEXACORE_API_TOKEN (optional shortcut to skip login)
+      - NEXACORE_API_TOKEN_EXPIRES_AT (optional metadata when providing a token)
+    """
+
+    env_credentials = {
+        "username": os.getenv("NEXACORE_API_USERNAME"),
+        "password": os.getenv("NEXACORE_API_PASSWORD"),
+        "account_id": os.getenv("NEXACORE_API_ACCOUNT_ID"),
+        "access_token": os.getenv("NEXACORE_API_TOKEN"),
+        "expires_at": os.getenv("NEXACORE_API_TOKEN_EXPIRES_AT"),
+    }
+
+    if any(env_credentials.values()):
+        return env_credentials
+
+    config_path = Path(__file__).resolve().parent.parent / "config.json"
+    if config_path.exists():
+        try:
+            with config_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            return {
+                "username": data.get("api_username"),
+                "password": data.get("api_password"),
+                "account_id": data.get("api_account_id"),
+                "access_token": data.get("api_access_token"),
+                "expires_at": data.get("api_token_expires_at"),
+            }
+        except Exception:
+            pass
+
+    return {"username": None, "password": None, "account_id": None, "access_token": None, "expires_at": None}
+
+
+def load_default_credentials() -> Dict[str, Optional[str]]:
+    """
+    Public wrapper so other modules (e.g., employee_repository) can read
+    defaults without importing the private helper directly.
+    """
+
+    return _load_default_credentials()
+
+
 # -----------------------------
 # Error types
 # -----------------------------
@@ -125,6 +176,19 @@ class APIClient:
             raise AuthError("Not logged in - call login() first")
 
         return {"Authorization": f"Bearer {self._token.access_token}"}
+
+    def has_token(self) -> bool:
+        return bool(self._token and self._token.access_token)
+
+    def set_token(self, access_token: str, expires_at: Optional[str] = None) -> None:
+        """
+        Manually set a token (useful when you already have a JWT issued by the backend).
+        """
+
+        if not access_token:
+            raise ValueError("access_token cannot be empty")
+
+        self._token = TokenInfo(access_token=access_token, expires_at=expires_at)
 
     # ---------- Public methods ----------
 
