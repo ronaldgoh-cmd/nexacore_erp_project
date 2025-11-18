@@ -85,30 +85,6 @@ def _load_default_credentials() -> Dict[str, Optional[str]]:
     if any(env_credentials.values()):
         return env_credentials
 
-    # Allow pasting the raw /auth/login response into api_token.json to avoid
-    # hand-editing config.json with secrets. Structure:
-    # {
-    #   "access_token": "...",
-    #   "token_type": "bearer",
-    #   "expires_at": "2025-11-19T13:15:24.193355"
-    # }
-    token_path = Path(__file__).resolve().parent.parent / "api_token.json"
-    if token_path.exists():
-        try:
-            with token_path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            if data.get("access_token"):
-                return {
-                    "username": None,
-                    "password": None,
-                    "account_id": None,
-                    "access_token": data.get("access_token"),
-                    "expires_at": data.get("expires_at"),
-                }
-        except Exception:
-            # Ignore malformed token file and continue to config.json
-            pass
-
     config_path = Path(__file__).resolve().parent.parent / "config.json"
     if config_path.exists():
         try:

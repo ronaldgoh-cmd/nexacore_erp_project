@@ -23,9 +23,6 @@ def _ensure_authenticated() -> None:
     """
 
     client = APIClient.get()
-    # Ensure we are pointing to the configured host (e.g., 34.87.155.9) instead
-    # of the localhost fallback.
-    client.refresh_base_url()
     if client.has_token():
         return
 
@@ -40,9 +37,8 @@ def _ensure_authenticated() -> None:
     if missing:
         raise AuthError(
             "Missing API credentials. Set environment variables (NEXACORE_API_USERNAME/"
-            "PASSWORD/ACCOUNT_ID or NEXACORE_API_TOKEN), drop your /auth/login JSON into "
-            "nexacore_erp/api_token.json, or fill api_username/api_password/api_account_id "
-            "in nexacore_erp/config.json."
+            "PASSWORD/ACCOUNT_ID or NEXACORE_API_TOKEN) or fill api_username/api_password/"
+            "api_account_id in nexacore_erp/config.json."
         )
 
     asyncio.run(
