@@ -4,6 +4,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 import requests
+from nexacore_erp.services.api_client import load_default_credentials
 
 
 class EmployeeAPIError(Exception):
@@ -74,6 +75,12 @@ def _headers() -> Dict[str, str]:
     if token:
         # IMPORTANT: backend expects the 'Bearer ' prefix
         headers["Authorization"] = f"Bearer {token}"
+    else:
+        raise EmployeeAPIError(
+            "No API token configured. Set NEXACORE_API_TOKEN or populate "
+            "api_access_token/api_username/api_password/api_account_id in "
+            "nexacore_erp/config.json so we can authenticate."
+        )
     return headers
 
 
