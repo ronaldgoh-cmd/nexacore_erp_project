@@ -1,3 +1,8 @@
 {
-  "api_base_url": "http://34.87.155.9:8000"
+  "api_base_url": "http://34.87.155.9:8000",
+  "api_access_token": "",
+  "api_token_expires_at": "",
+  "api_username": "",
+  "api_password": "",
+  "api_account_id": ""
 }
