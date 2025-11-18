@@ -42,29 +42,16 @@ def _get_base() -> str:
     return "http://127.0.0.1:8000"
 
 
-_token_cache: Optional[str] = None
-
-
 def _get_token() -> Optional[str]:
     """
     Access token for Authorization header.
 
-    Priority:
-      1) NEXACORE_API_TOKEN env var
-      2) token cached from an earlier login in this process
-      3) api_access_token in config.json
-      4) If username/password/account_id are configured, perform /auth/login to
-         fetch a token and cache it.
+    Read from NEXACORE_API_TOKEN (or config.json: api_access_token) and used as:
+      Authorization: Bearer <token>
     """
-    global _token_cache
-
     token = os.getenv("NEXACORE_API_TOKEN")
     if token:
-        _token_cache = token
         return token
-
-    if _token_cache:
-        return _token_cache
 
     config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
     if os.path.exists(config_path):
@@ -75,35 +62,9 @@ def _get_token() -> Optional[str]:
                 data = json.load(f)
             cfg_token = data.get("api_access_token")
             if cfg_token:
-                _token_cache = str(cfg_token)
-                return _token_cache
+                return str(cfg_token)
         except Exception:
             pass
-
-    # As a convenience, fall back to logging in with stored credentials.
-    creds = load_default_credentials()
-    if creds.get("username") and creds.get("password") and creds.get("account_id"):
-        try:
-            resp = _session.post(
-                f"{_get_base()}/auth/login",
-                json={
-                    "username": creds.get("username"),
-                    "password": creds.get("password"),
-                    "account_id": creds.get("account_id"),
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            _token_cache = data.get("access_token") or None
-            if _token_cache:
-                return _token_cache
-        except requests.HTTPError as exc:  # pragma: no cover - defensive
-            raise EmployeeAPIError(
-                f"Login failed against {_get_base()}/auth/login: {exc.response.text}"
-            ) from exc
-        except requests.RequestException as exc:  # pragma: no cover - network issue
-            raise EmployeeAPIError(f"Unable to reach backend for login: {exc}") from exc
 
     return None
 
