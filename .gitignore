@@ -19,6 +19,9 @@ Thumbs.db
 .env.*
 !.env.example
 
+# Local API token cache (do not commit real tokens)
+nexacore_erp/api_token.json
+
 *.xlsx
 *.xlsm
 *.csv
