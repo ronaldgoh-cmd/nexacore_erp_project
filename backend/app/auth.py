@@ -51,6 +51,7 @@ async def register_user(
         account_id=payload.account_id,
         email=payload.email or "",
         password_hash=hash_password(payload.password),
+        role=payload.role or "user",
     )
     session.add(user)
     await session.commit()

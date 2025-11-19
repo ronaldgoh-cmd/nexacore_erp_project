@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..dependencies import get_current_user, get_db_session, require_same_tenant
 from ..models import Employee, User
 from ..schemas import EmployeeCreate, EmployeeRead
+from ..websocket_manager import broadcast_event
 
 router = APIRouter(prefix="/employees", tags=["employees"])
 
@@ -58,4 +59,10 @@ async def create_employee(
     session.add(employee)
     await session.commit()
     await session.refresh(employee)
+    await broadcast_event(
+        current_user.account_id,
+        channel="employees",
+        action="created",
+        data=EmployeeRead.model_validate(employee).model_dump(),
+    )
     return employee
