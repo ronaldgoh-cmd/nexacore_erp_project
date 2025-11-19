@@ -1,7 +1,7 @@
 """Pydantic schemas used across the backend API."""
 from datetime import date, datetime, timedelta
 
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 
 class Token(BaseModel):
@@ -26,6 +26,7 @@ class UserCreate(BaseModel):
     password: str
     account_id: str
     email: EmailStr | None = None
+    role: str | None = None
 
 
 class UserRead(BaseModel):
@@ -65,6 +66,23 @@ class EmployeeRead(EmployeeBase):
 
     class Config:
         from_attributes = True
+
+
+class SystemStatusRead(BaseModel):
+    """Serializer for the global maintenance flag."""
+
+    maintenance_mode: bool
+    message: str
+
+    class Config:
+        from_attributes = True
+
+
+class SystemStatusUpdate(BaseModel):
+    """Request payload to toggle maintenance mode."""
+
+    maintenance_mode: bool
+    message: str | None = None
 
 
 def compute_expiry(minutes: int) -> datetime:

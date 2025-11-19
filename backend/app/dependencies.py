@@ -7,7 +7,7 @@ from typing import Any, Dict
 
 import jwt
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,12 +47,7 @@ async def get_current_user(
     token = credentials.credentials
 
     try:
-        payload: Dict[str, Any] = jwt.decode(
-            token,
-            settings.secret_key,
-            algorithms=["HS256"],
-        )
-        token_data = TokenData(**payload)
+        token_data = decode_access_token(token)
     except jwt.PyJWTError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -82,6 +77,27 @@ def require_same_tenant(user: User, account_id: str) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Tenant mismatch",
         )
+
+
+def require_admin(user: User) -> None:
+    """Ensure the current user has the admin role."""
+
+    if getattr(user, "role", "user") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator role required",
+        )
+
+
+def decode_access_token(token: str) -> TokenData:
+    """Decode a JWT access token and return its payload."""
+
+    payload: Dict[str, Any] = jwt.decode(
+        token,
+        settings.secret_key,
+        algorithms=["HS256"],
+    )
+    return TokenData(**payload)
 
 
 def token_payload(user: User) -> dict[str, Any]:
